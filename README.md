@@ -8,8 +8,6 @@
 hermes plugins install tiled-sessions
 ```
 
-[▶ Watch the 50-second demo](https://github.com/strnadchristopher/tiled-sessions/releases/download/v0.2.0/tiled-sessions-launch-720p.mp4)
-
 | | | |
 |---|---|---|
 | ![Grid: four sessions in an even 2×2](assets/screenshots/01-grid.jpg) | ![Master: one large tile with the rest stacked beside it](assets/screenshots/02-master.jpg) | ![Dwindle: each tile halves the last](assets/screenshots/03-dwindle.jpg) |
