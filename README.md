@@ -29,7 +29,7 @@ Hyprland-style tiling for Hermes Desktop. Click a session and it opens in a new 
 
 ## Requirements
 
-Tiled Sessions uses the session-tiling seam of the desktop plugin SDK: `host.openSession(id, { dock })`, `host.state.sessionLayout`, `host.state.pinnedSessionIds` and `host.layout`. It was added in [NousResearch/hermes-agent#149656](https://github.com/NousResearch/hermes-agent/pull/149656). On a Hermes build without it, the Tiles pane says so and sessions open as ordinary tabs.
+Tiled Sessions uses the session-tiling seam of the desktop plugin SDK: `host.openSession(id, { dock })`, `host.state.sessionLayout`, `host.state.pinnedSessionIds` and `host.layout`. It is proposed upstream in [NousResearch/hermes-agent#149656](https://github.com/NousResearch/hermes-agent/pull/149656). On a Hermes build without it, the Tiles pane says so and sessions open as ordinary tabs.
 
 It uses only the plugin SDK, React and `react/jsx-runtime`: no DOM queries, no observers, no patching. It makes no network calls of its own and sends no telemetry.
 
