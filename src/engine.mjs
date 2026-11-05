@@ -282,3 +282,142 @@ export function mergeSessionRows(live = [], stored = []) {
     .filter(r => (r.message_count ?? 1) > 0 || r.title)
     .sort((a, b) => (b.started_at ?? 0) - (a.started_at ?? 0))
 }
+
+// ---------------------------------------------------------------------------
+// Layouts: ordered chat zones → a core arrangement spec
+// (host.layout.arrangeSessions). Leaves are { pane }, splits are
+// { orientation, children, weights? }.
+// ---------------------------------------------------------------------------
+
+export const LAYOUTS = ['grid', 'master', 'dwindle', 'columns']
+
+/** Every chat zone in the core tree, in tree order: { groupId, pane } where
+ *  `pane` is the zone's active pane. A zone counts when all its panes are chats. */
+export function chatZones(coreRoot, isChat = isSessionPane) {
+  const out = []
+  const walk = n => {
+    if (!n) return
+    if (n.type === 'group') {
+      if (n.panes.length && n.panes.every(isChat)) out.push({ groupId: n.id, pane: n.panes.includes(n.active) ? n.active : n.panes[0] })
+      return
+    }
+    n.children.forEach(walk)
+  }
+  walk(coreRoot)
+  return out
+}
+
+/** Keep `order` (group ids) for zones still open, append new zones in tree
+ *  order. New zones go right after `after` when given (dwindle-style). */
+export function reconcileOrder(order, zoneIds, after = null) {
+  const open = new Set(zoneIds)
+  const kept = order.filter(id => open.has(id))
+  const fresh = zoneIds.filter(id => !kept.includes(id))
+  if (!fresh.length) return kept
+  const at = after ? kept.indexOf(after) : -1
+  return at === -1 ? [...kept, ...fresh] : [...kept.slice(0, at + 1), ...fresh, ...kept.slice(at + 1)]
+}
+
+/** Rows × columns for `n` equal tiles in `area`: tiles as close to square as
+ *  possible, few empty cells (the last row's tiles widen to fill). */
+export function gridDims(n, area) {
+  let best = { rows: 1, cols: Math.max(1, n), cost: Infinity }
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols)
+    const empty = rows * cols - n
+    if (empty >= cols) continue
+    const aspect = area.w / cols / (area.h / rows)
+    const cost = Math.abs(Math.log(aspect)) + 0.35 * empty
+    if (cost < best.cost - 1e-9) best = { rows, cols, cost }
+  }
+  return { rows: best.rows, cols: best.cols }
+}
+
+const leafOf = pane => ({ pane })
+const row = children => (children.length === 1 ? children[0] : { orientation: 'row', children })
+const column = children => (children.length === 1 ? children[0] : { orientation: 'column', children })
+
+/**
+ * Arrangement spec for `panes` (in order) filling `area`.
+ *  grid     every tile the same height; rows split evenly (Hyprland-ish "grid")
+ *  master   first pane on the left at `masterRatio`, the rest stacked evenly
+ *  dwindle  Hyprland's default: each tile halves the previous along its long side
+ *  columns  side by side, equal widths
+ */
+export function arrangement(layout, panes, area, { masterRatio = 0.55 } = {}) {
+  const n = panes.length
+  if (n === 0) return null
+  if (n === 1) return leafOf(panes[0])
+  const leaves = panes.map(leafOf)
+  if (layout === 'columns') return row(leaves)
+  if (layout === 'master') {
+    const r = Math.min(0.85, Math.max(0.15, masterRatio))
+    const tall = area.h > area.w
+    const stack = tall ? row(leaves.slice(1)) : column(leaves.slice(1))
+    return { orientation: tall ? 'column' : 'row', weights: [r, 1 - r], children: [leaves[0], stack] }
+  }
+  if (layout === 'dwindle') {
+    const build = (i, rect) => {
+      if (i === n - 1) return leaves[i]
+      const wide = rect.w >= rect.h
+      const rest = wide ? { w: rect.w / 2, h: rect.h } : { w: rect.w, h: rect.h / 2 }
+      return { orientation: wide ? 'row' : 'column', children: [leaves[i], build(i + 1, rest)] }
+    }
+    return build(0, area)
+  }
+  // grid
+  const { rows, cols } = gridDims(n, area)
+  const lines = []
+  for (let r = 0; r < rows; r++) lines.push(row(leaves.slice(r * cols, (r + 1) * cols)))
+  return column(lines.filter(l => l))
+}
+
+/** Next layout in LAYOUTS after `current`. */
+export const nextLayout = current => LAYOUTS[(LAYOUTS.indexOf(current) + 1) % LAYOUTS.length]
+
+/** Move `id` to the front (master). */
+export const promote = (order, id) => (order.includes(id) ? [id, ...order.filter(o => o !== id)] : order)
+
+/** Exchange two ids in `order`. */
+export function swapOrder(order, p, q) {
+  const i = order.indexOf(p)
+  const j = order.indexOf(q)
+  if (i === -1 || j === -1) return order
+  const next = [...order]
+  next[i] = q
+  next[j] = p
+  return next
+}
+
+/** Leaf rects of an arrangement spec (equal weights unless given). */
+export function specRects(spec, rect, out = new Map()) {
+  if (!spec) return out
+  if (spec.pane) {
+    out.set(spec.pane, rect)
+    return out
+  }
+  const w = spec.weights ?? spec.children.map(() => 1)
+  const total = w.reduce((a, b) => a + b, 0) || 1
+  let at = 0
+  spec.children.forEach((c, i) => {
+    const f = w[i] / total
+    const r =
+      spec.orientation === 'row'
+        ? { x: rect.x + rect.w * at, y: rect.y, w: rect.w * f, h: rect.h }
+        : { x: rect.x, y: rect.y + rect.h * at, w: rect.w, h: rect.h * f }
+    specRects(c, r, out)
+    at += f
+  })
+  return out
+}
+
+/** Id of the core group holding `paneId`, or null. */
+export function groupIdOfPane(coreRoot, paneId) {
+  if (!coreRoot || !paneId) return null
+  if (coreRoot.type === 'group') return coreRoot.panes.includes(paneId) ? coreRoot.id : null
+  for (const c of coreRoot.children) {
+    const hit = groupIdOfPane(c, paneId)
+    if (hit) return hit
+  }
+  return null
+}

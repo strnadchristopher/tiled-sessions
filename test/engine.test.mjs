@@ -2,6 +2,15 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  arrangement,
+  groupIdOfPane,
+  specRects,
+  chatZones,
+  gridDims,
+  nextLayout,
+  promote,
+  reconcileOrder,
+  swapOrder,
   coreParentSplit,
   coreSplits,
   equalize,
@@ -286,5 +295,93 @@ describe('equalizePlan', () => {
     const even = { type: 'split', id: 's', orientation: 'row', weights: [1, 1], children: [g('a', ['workspace']), g('b', ['session-tile:b'])] }
     assert.deepEqual(equalizePlan(even, chat), [])
     assert.deepEqual(equalizePlan(g('a', ['workspace']), chat), [])
+  })
+})
+
+// ---- layouts ---------------------------------------------------------------
+
+const WIDE = { x: 0, y: 0, w: 1640, h: 1000 }
+const ids = n => Array.from({ length: n }, (_, i) => `p${i}`)
+
+describe('layouts', () => {
+  it('grid: every tile has the same height, and full rows the same size', () => {
+    for (let n = 2; n <= 9; n++) {
+      const r = [...specRects(arrangement('grid', ids(n), WIDE), WIDE).values()]
+      const heights = new Set(r.map(x => Math.round(x.h)))
+      assert.equal(heights.size, 1, `n=${n} heights ${[...heights]}`)
+      const area = r.reduce((s, x) => s + x.w * x.h, 0)
+      assert.ok(Math.abs(area - WIDE.w * WIDE.h) < 1, `n=${n} fills the area`)
+    }
+  })
+
+  it('grid: 4 is 2×2, 3 is three columns, 6 is 3×2 on a wide area', () => {
+    assert.deepEqual(gridDims(4, WIDE), { rows: 2, cols: 2 })
+    assert.deepEqual(gridDims(3, WIDE), { rows: 1, cols: 3 })
+    assert.deepEqual(gridDims(6, WIDE), { rows: 2, cols: 3 })
+    const four = [...specRects(arrangement('grid', ids(4), WIDE), WIDE).values()]
+    assert.ok(four.every(x => Math.round(x.w) === 820 && Math.round(x.h) === 500))
+  })
+
+  it('master: first pane takes the ratio on the left, the rest stack evenly', () => {
+    const r = specRects(arrangement('master', ids(4), WIDE, { masterRatio: 0.6 }), WIDE)
+    assert.equal(Math.round(r.get('p0').w), 984)
+    assert.equal(Math.round(r.get('p0').h), 1000)
+    for (const p of ['p1', 'p2', 'p3']) {
+      assert.equal(Math.round(r.get(p).x), 984)
+      assert.equal(Math.round(r.get(p).h), 333)
+    }
+  })
+
+  it('dwindle: each tile halves the previous along its longer side', () => {
+    const r = specRects(arrangement('dwindle', ids(4), WIDE), WIDE)
+    assert.deepEqual([r.get('p0').w, r.get('p0').h], [820, 1000])
+    assert.deepEqual([r.get('p1').w, r.get('p1').h], [820, 500])
+    assert.deepEqual([r.get('p2').w, r.get('p2').h], [410, 500])
+    assert.deepEqual([r.get('p3').w, r.get('p3').h], [410, 500])
+  })
+
+  it('columns: equal widths, full height', () => {
+    const r = [...specRects(arrangement('columns', ids(3), WIDE), WIDE).values()]
+    assert.ok(r.every(x => Math.abs(x.w - WIDE.w / 3) < 1e-6 && x.h === 1000))
+  })
+
+  it('one pane is a bare leaf; none is null', () => {
+    assert.deepEqual(arrangement('grid', ['a'], WIDE), { pane: 'a' })
+    assert.equal(arrangement('grid', [], WIDE), null)
+  })
+
+  it('chatZones lists all-chat groups with their active pane, skipping chrome', () => {
+    const root = {
+      type: 'split', id: 's', orientation: 'row', weights: [1, 1, 1, 1], children: [
+        { type: 'group', id: 'side', panes: ['sessions'], active: 'sessions' },
+        { type: 'group', id: 'g1', panes: ['workspace'], active: 'workspace' },
+        { type: 'group', id: 'g2', panes: ['session-tile:a', 'session-tile:b'], active: 'session-tile:b' },
+        { type: 'group', id: 'g3', panes: ['terminal'], active: 'terminal' }
+      ]
+    }
+    assert.deepEqual(chatZones(root), [{ groupId: 'g1', pane: 'workspace' }, { groupId: 'g2', pane: 'session-tile:b' }])
+  })
+
+  it('reconcileOrder keeps known order, drops closed, appends or inserts new', () => {
+    assert.deepEqual(reconcileOrder(['a', 'b', 'c'], ['c', 'a', 'd']), ['a', 'c', 'd'])
+    assert.deepEqual(reconcileOrder(['a', 'b', 'c'], ['a', 'b', 'c', 'd'], 'a'), ['a', 'd', 'b', 'c'])
+  })
+
+  it('promote, swapOrder and nextLayout', () => {
+    assert.deepEqual(promote(['a', 'b', 'c'], 'c'), ['c', 'a', 'b'])
+    assert.deepEqual(swapOrder(['a', 'b', 'c'], 'a', 'c'), ['c', 'b', 'a'])
+    assert.equal(nextLayout('columns'), 'grid')
+    assert.equal(nextLayout('grid'), 'master')
+  })
+})
+
+describe('groupIdOfPane', () => {
+  it('finds the zone holding a pane', () => {
+    const root = { type: 'split', id: 's', orientation: 'row', weights: [1, 1], children: [
+      { type: 'group', id: 'g1', panes: ['workspace'], active: 'workspace' },
+      { type: 'group', id: 'g2', panes: ['session-tile:a', 'session-tile:b'], active: 'session-tile:a' }
+    ] }
+    assert.equal(groupIdOfPane(root, 'session-tile:b'), 'g2')
+    assert.equal(groupIdOfPane(root, 'nope'), null)
   })
 })
