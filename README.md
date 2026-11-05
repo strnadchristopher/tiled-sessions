@@ -19,11 +19,12 @@ Hyprland-style tiling for Hermes Desktop. Click a session and it opens in a new 
   |---|---|
   | Move focus | `Mod+Alt+←/→/↑/↓` |
   | Swap with neighbour | `Mod+Alt+Shift+←/→/↑/↓` |
-  | Close focused tile | `Mod+Alt+Backspace` |
+  | Close focused tile | `Mod+Alt+Backspace`, or Hermes' own `Ctrl+W` / `⌘W` |
   | Toggle the focused split's direction | `Mod+Alt+J` |
   | Equalize sizes | `Mod+Alt+=` |
   | Move the focused session to main | unbound |
 
+- **Keyboard focus follows.** Moving focus moves the caret too, so what you type, and `Ctrl+W`, land in the focused tile. (Hermes' `Ctrl+W` acts on the tile under the pointer first, when the pointer is over one.)
 - **Old behaviour on demand.** Hold `Alt` (configurable) while clicking to replace the focused chat, as stock Hermes does. You can also switch the default back to replace, and set a maximum tile count.
 - **Survives a restart.** Hermes persists the pane tree, so tiles, the open set and split ratios come back as you left them.
 

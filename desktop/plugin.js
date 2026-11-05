@@ -359,6 +359,14 @@ function createController(ctx) {
 
   const opts = () => ({ history: $history.get(), isCandidate: isSessionPane })
 
+  /** Focus an on-screen session the way a tiling WM does: front its tile AND
+   *  move the keyboard into its composer, so typing, ⌘W and the readouts all
+   *  agree on which tile is "the" tile. */
+  async function focusTile(storedId) {
+    await host.openSession(storedId, { intent: 'tab' })
+    host.composer?.focus?.(storedId)
+  }
+
   async function open(storedId, { replace = false } = {}) {
     if (!storedId) return
     const s = $settings.get()
@@ -377,7 +385,7 @@ function createController(ctx) {
     const { l, tree, area } = engineView()
     const open = openSessions(l.root, l.mainStoredSessionId)
     if (open.some(o => o.storedSessionId === storedId)) {
-      await host.openSession(storedId, { intent: 'tab' }) // already on screen → focus it
+      await focusTile(storedId) // already on screen → focus it
       return
     }
     if (!l.mainStoredSessionId) {
@@ -402,7 +410,7 @@ function createController(ctx) {
    *  Re-opening an on-screen session only focuses it, so this never stacks. */
   function focusOnceTiled(storedId, tries = 12) {
     if (paneOf(storedId)) {
-      void host.openSession(storedId, { intent: 'tab' })
+      void focusTile(storedId)
       return
     }
     if (tries > 0) ctx.setTimeout(() => focusOnceTiled(storedId, tries - 1), 100)
@@ -429,7 +437,7 @@ function createController(ctx) {
   function focusDir(dir) {
     const hit = neighbourOfFocused(dir)
     const target = hit && storedIdOfPane(hit.to, layout().mainStoredSessionId)
-    if (target) void host.openSession(target, { intent: 'tab' })
+    if (target) void focusTile(target)
   }
 
   function swapDir(dir) {
