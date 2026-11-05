@@ -712,7 +712,9 @@ function createController(ctx) {
     if (!LAYOUTS.includes(next)) return
     setSettings({ layout: next })
     if (canArrange()) retile({ force: true })
-    if (announce) host.notify({ kind: 'info', message: `Tiles: ${LAYOUT_INFO[next].label}` })
+    // The status-bar chip and the Tiles pane show the layout; a toast per
+    // press would pile up while cycling. Announce only without them.
+    if (announce && !canArrange()) host.notify({ kind: 'info', message: `Tiles: ${LAYOUT_INFO[next].label}` })
   }
 
   const cycleLayout = () => setLayout(nextLayout($settings.get().layout), { announce: true })
