@@ -1,0 +1,11 @@
+{
+  "name": "tiled-sessions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs --check && node --check desktop/plugin.js",
+    "test": "node --test test/*.test.mjs"
+  }
+}

@@ -1,0 +1,26 @@
+# Tiled Sessions: a desktop-only Hermes plugin. The entry point is
+# desktop/plugin.js (generated from src/ by scripts/build.mjs).
+name: tiled-sessions
+title: Tiled Sessions
+version: "0.1.0"
+license: MIT
+description: >-
+  Hyprland-style tiling for Hermes Desktop sessions. Clicking a session opens
+  it in a new tile that splits the largest (or the focused) tile along its
+  longer side; closing a tile collapses its split. A Tiles pane lists Pinned,
+  Open (in tile order, focus highlighted, with a close button per row) and
+  Sessions. Rebindable keybinds move focus, swap tiles, close, flip a split
+  and equalize sizes. SDK-only; public gateway RPCs only; no telemetry.
+maintainer: strnadchristopher
+homepage: https://github.com/strnadchristopher/tiled-sessions
+docs_url: https://github.com/strnadchristopher/tiled-sessions#readme
+tags:
+  - desktop
+  - session-management
+  - tiling
+  - layout
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
