@@ -1,8 +1,21 @@
+![Tiled Sessions, a community desktop plugin for Hermes](assets/tiled-sessions.jpg)
+
 # Tiled Sessions
 
 **Hyprland for Hermes Desktop.** Click a session and it opens as a new tile beside the ones you already have, instead of replacing the chat you were in. Pick a layout, drive it from the keyboard, and keep a whole team of agents on screen at once.
 
-![Tiled Sessions: four sessions tiled in an even 2×2 grid](docs/media/grid.png)
+```sh
+hermes plugins install tiled-sessions
+```
+
+[▶ Watch the 50-second demo](https://github.com/strnadchristopher/tiled-sessions/releases/download/v0.2.0/tiled-sessions-launch-720p.mp4)
+
+| | | |
+|---|---|---|
+| ![Grid: four sessions in an even 2×2](assets/screenshots/01-grid.jpg) | ![Master: one large tile with the rest stacked beside it](assets/screenshots/02-master.jpg) | ![Dwindle: each tile halves the last](assets/screenshots/03-dwindle.jpg) |
+| **Grid** | **Master** | **Dwindle** |
+| ![Typing into the focused tile](assets/screenshots/04-focused-tile.jpg) | ![Eight sessions, all the same size](assets/screenshots/05-eight-tiles.jpg) | ![Shortcut settings](assets/screenshots/06-settings.jpg) |
+| **Type where you focus** | **Eight at once** | **Every shortcut editable** |
 
 ## What it does
 
