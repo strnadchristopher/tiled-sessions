@@ -325,7 +325,10 @@ function chatZones(coreRoot, isChat = isSessionPane) {
   const walk = n => {
     if (!n) return
     if (n.type === 'group') {
-      if (n.panes.length && n.panes.every(isChat)) out.push({ groupId: n.id, pane: n.panes.includes(n.active) ? n.active : n.panes[0] })
+      // Any chat makes it a chat zone; other tabs (Preview, a plugin workspace)
+      // move with it. Name it by its active tab when that is a chat.
+      const chats = n.panes.filter(isChat)
+      if (chats.length) out.push({ groupId: n.id, pane: chats.includes(n.active) ? n.active : chats[0] })
       return
     }
     n.children.forEach(walk)

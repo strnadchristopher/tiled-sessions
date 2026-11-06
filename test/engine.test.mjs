@@ -362,6 +362,21 @@ describe('layouts', () => {
     assert.deepEqual(chatZones(root), [{ groupId: 'g1', pane: 'workspace' }, { groupId: 'g2', pane: 'session-tile:b' }])
   })
 
+  it('chatZones counts a chat that shares its group with Preview or a plugin workspace', () => {
+    const root = {
+      type: 'split', id: 's', orientation: 'row', weights: [1, 1, 1], children: [
+        { type: 'group', id: 'main', panes: ['preview', 'plugin-workspace:hermes-bots:group:x', 'workspace'], active: 'workspace' },
+        { type: 'group', id: 'g1', panes: ['session-tile:a'], active: 'session-tile:a' },
+        { type: 'group', id: 'g2', panes: ['preview', 'session-tile:b'], active: 'preview' }
+      ]
+    }
+    assert.deepEqual(chatZones(root), [
+      { groupId: 'main', pane: 'workspace' },
+      { groupId: 'g1', pane: 'session-tile:a' },
+      { groupId: 'g2', pane: 'session-tile:b' }
+    ])
+  })
+
   it('reconcileOrder keeps known order, drops closed, appends or inserts new', () => {
     assert.deepEqual(reconcileOrder(['a', 'b', 'c'], ['c', 'a', 'd']), ['a', 'c', 'd'])
     assert.deepEqual(reconcileOrder(['a', 'b', 'c'], ['a', 'b', 'c', 'd'], 'a'), ['a', 'd', 'b', 'c'])
