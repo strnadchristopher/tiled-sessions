@@ -8,12 +8,14 @@
 hermes plugins install tiled-sessions
 ```
 
+![Cycling layouts, fullscreen and moving tiles from the keyboard](assets/demo.gif)
+
 | | | |
 |---|---|---|
 | ![Grid: four sessions in an even 2×2](assets/screenshots/01-grid.jpg) | ![Master: one large tile with the rest stacked beside it](assets/screenshots/02-master.jpg) | ![Dwindle: each tile halves the last](assets/screenshots/03-dwindle.jpg) |
 | **Grid** | **Master** | **Dwindle** |
-| ![Typing into the focused tile](assets/screenshots/04-focused-tile.jpg) | ![Eight sessions, all the same size](assets/screenshots/05-eight-tiles.jpg) | ![Shortcut settings](assets/screenshots/06-settings.jpg) |
-| **Type where you focus** | **Eight at once** | **Every shortcut editable** |
+| ![Fullscreen: the focused tile fills the chat area](assets/screenshots/04-fullscreen.jpg) | ![Right-click a session to pin, rename, move or close it](assets/screenshots/05-row-menu.jpg) | ![Settings: layouts to offer, sizes and shortcuts](assets/screenshots/06-settings.jpg) |
+| **Fullscreen** | **Right-click any session** | **Every layout and shortcut is yours** |
 
 ## What it does
 
