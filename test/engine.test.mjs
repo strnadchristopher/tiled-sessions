@@ -6,6 +6,7 @@ import {
   groupIdOfPane,
   specRects,
   chatZones,
+  rowDetails,
   gridDims,
   nextLayout,
   promote,
@@ -375,6 +376,13 @@ describe('layouts', () => {
       { groupId: 'g1', pane: 'session-tile:a' },
       { groupId: 'g2', pane: 'session-tile:b' }
     ])
+  })
+
+  it('rowDetails mirrors core: branch · model · counts, preview only for titled chats', () => {
+    const s = { title: 'Fix auth', preview: 'please  fix\nthe login', model: 'anthropic/claude-x', git_branch: 'main', message_count: 1, tool_call_count: 3 }
+    assert.deepEqual(rowDetails(s), { metadata: 'main · claude-x · 1 message · 3 tool calls', preview: 'please fix the login' })
+    assert.deepEqual(rowDetails({ ...s, title: '', git_branch: null, tool_call_count: 0, message_count: 2 }), { metadata: 'claude-x · 2 messages', preview: null })
+    assert.deepEqual(rowDetails(undefined), { metadata: '', preview: null })
   })
 
   it('reconcileOrder keeps known order, drops closed, appends or inserts new', () => {

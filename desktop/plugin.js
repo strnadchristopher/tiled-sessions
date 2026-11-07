@@ -451,6 +451,29 @@ function groupIdOfPane(coreRoot, paneId) {
   }
   return null
 }
+
+// ---------------------------------------------------------------------------
+// Session rows
+// ---------------------------------------------------------------------------
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
+
+/** Same fields core's sidebar shows: comfortable = branch · model · counts;
+ *  detailed adds the opening request when the chat has its own title. */
+function rowDetails(session) {
+  if (!session) return { metadata: '', preview: null }
+  const model = session.model?.split('/').pop()?.trim() || null
+  const metadata = [
+    session.git_branch?.trim() || null,
+    model,
+    session.message_count > 0 ? plural(session.message_count, 'message', 'messages') : null,
+    session.tool_call_count > 0 ? plural(session.tool_call_count, 'tool call', 'tool calls') : null
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const preview = session.preview?.replace(/\s+/g, ' ').trim() || null
+  return { metadata, preview: session.title?.trim() ? preview : null }
+}
 /* ENGINE:END */
 
 const ID = 'tiled-sessions'
@@ -772,10 +795,19 @@ function useSessionRows() {
   })
 }
 
-function Row({ storedId, title, focused, onOpen, onClose, dim }) {
+// Session-list density (Settings → Appearance), read-only from core when the
+// SDK exposes it; older Desktops get the one-line compact row.
+const COMPACT = atom('compact')
+const densityAtom = () => host.state?.sessionListDensity ?? COMPACT
+const ROW_HEIGHT = { compact: 'h-7', comfortable: 'min-h-[2.75rem] py-1', detailed: 'min-h-[3.875rem] py-1' }
+
+function Row({ storedId, title, session, focused, onOpen, onClose, dim }) {
+  const density = useValue(densityAtom())
+  const details = density === 'compact' ? null : rowDetails(session)
   return jsxs('div', {
     className: cn(
-      'group relative flex h-7 cursor-pointer items-center gap-2 rounded-md pl-2.5 pr-1 text-[0.8125rem] transition-colors',
+      'group relative flex cursor-pointer items-center gap-2 rounded-md pl-2.5 pr-1 text-[0.8125rem] transition-colors',
+      ROW_HEIGHT[density] ?? ROW_HEIGHT.compact,
       focused ? 'text-foreground' : 'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-foreground',
       dim && !focused && 'opacity-60'
     ),
@@ -794,7 +826,18 @@ function Row({ storedId, title, focused, onOpen, onClose, dim }) {
     children: [
       focused ? jsx('span', { 'aria-hidden': true, className: 'absolute left-0 w-0.5 rounded-full bg-(--ui-accent)', style: { top: 6, bottom: 6 } }) : null,
       jsx(SessionStatusDot, { storedSessionId: storedId }),
-      jsx('span', { className: 'min-w-0 flex-1 truncate', children: title }),
+      jsxs('span', {
+        className: 'min-w-0 flex-1',
+        children: [
+          jsx('span', { className: 'block truncate', children: title }),
+          details?.metadata
+            ? jsx('span', { className: 'mt-0.5 block truncate text-[0.625rem] text-(--ui-text-tertiary)', children: details.metadata })
+            : null,
+          density === 'detailed' && details?.preview
+            ? jsx('span', { className: 'mt-1 block truncate text-[0.625rem] text-(--ui-text-quaternary)', children: details.preview })
+            : null
+        ]
+      }),
       onClose
         ? jsx('button', {
             type: 'button',
@@ -809,6 +852,18 @@ function Row({ storedId, title, focused, onOpen, onClose, dim }) {
           })
         : null
     ]
+  })
+}
+
+/** Above the Open list: a fresh chat in its own tile (plain new chat without tiling). */
+function NewSessionRow({ ctl }) {
+  const run = () => (typeof host.layout?.newChatTile === 'function' ? ctl.newTile() : host.newChat())
+  return jsxs('button', {
+    type: 'button',
+    className:
+      'mb-2 flex h-7 w-full items-center gap-2 rounded-md pl-2.5 pr-1 text-left text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+    onClick: run,
+    children: [jsx(Codicon, { name: 'add', className: 'text-[0.875rem]' }), jsx('span', { className: 'min-w-0 flex-1 truncate', children: 'New session' })]
   })
 }
 
@@ -932,10 +987,11 @@ function makePane(ctl) {
           ? jsx(Section, {
               label: 'Pinned',
               children: pinned.map(r =>
-                jsx(Row, { storedId: rowId(r), title: titleOf(rowId(r)), focused: focused === rowId(r), onOpen }, `p:${rowId(r)}`)
+                jsx(Row, { storedId: rowId(r), title: titleOf(rowId(r)), session: r, focused: focused === rowId(r), onOpen }, `p:${rowId(r)}`)
               )
             })
           : null,
+        jsx(NewSessionRow, { ctl }),
         jsx(Section, {
           label: tiling ? 'Open' : 'Opened here',
           count: open.length || null,
@@ -946,6 +1002,7 @@ function makePane(ctl) {
                   {
                     storedId: o.storedSessionId,
                     title: titleOf(o.storedSessionId),
+                    session: byKey.get(o.storedSessionId),
                     focused: focused === o.storedSessionId,
                     dim: !o.visible,
                     onOpen,
@@ -958,7 +1015,7 @@ function makePane(ctl) {
         }),
         jsx(Section, {
           label: 'Sessions',
-          children: rest.map(r => jsx(Row, { storedId: rowId(r), title: titleOf(rowId(r)), focused: false, onOpen }, `s:${rowId(r)}`))
+          children: rest.map(r => jsx(Row, { storedId: rowId(r), title: titleOf(rowId(r)), session: r, focused: false, onOpen }, `s:${rowId(r)}`))
         })
       ]
     })

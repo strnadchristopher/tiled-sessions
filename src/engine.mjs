@@ -424,3 +424,26 @@ export function groupIdOfPane(coreRoot, paneId) {
   }
   return null
 }
+
+// ---------------------------------------------------------------------------
+// Session rows
+// ---------------------------------------------------------------------------
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
+
+/** Same fields core's sidebar shows: comfortable = branch · model · counts;
+ *  detailed adds the opening request when the chat has its own title. */
+export function rowDetails(session) {
+  if (!session) return { metadata: '', preview: null }
+  const model = session.model?.split('/').pop()?.trim() || null
+  const metadata = [
+    session.git_branch?.trim() || null,
+    model,
+    session.message_count > 0 ? plural(session.message_count, 'message', 'messages') : null,
+    session.tool_call_count > 0 ? plural(session.tool_call_count, 'tool call', 'tool calls') : null
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const preview = session.preview?.replace(/\s+/g, ' ').trim() || null
+  return { metadata, preview: session.title?.trim() ? preview : null }
+}
