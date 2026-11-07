@@ -605,6 +605,17 @@ export function specRects(spec, rect, out = new Map()) {
   return out
 }
 
+/** The core group with id `groupId`, or null. */
+export function groupById(coreRoot, groupId) {
+  if (!coreRoot || !groupId) return null
+  if (coreRoot.type === 'group') return coreRoot.id === groupId ? coreRoot : null
+  for (const c of coreRoot.children) {
+    const hit = groupById(c, groupId)
+    if (hit) return hit
+  }
+  return null
+}
+
 /** Id of the core group holding `paneId`, or null. */
 export function groupIdOfPane(coreRoot, paneId) {
   if (!coreRoot || !paneId) return null

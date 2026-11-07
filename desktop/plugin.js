@@ -634,6 +634,17 @@ function specRects(spec, rect, out = new Map()) {
   return out
 }
 
+/** The core group with id `groupId`, or null. */
+function groupById(coreRoot, groupId) {
+  if (!coreRoot || !groupId) return null
+  if (coreRoot.type === 'group') return coreRoot.id === groupId ? coreRoot : null
+  for (const c of coreRoot.children) {
+    const hit = groupById(c, groupId)
+    if (hit) return hit
+  }
+  return null
+}
+
 /** Id of the core group holding `paneId`, or null. */
 function groupIdOfPane(coreRoot, paneId) {
   if (!coreRoot || !paneId) return null
@@ -682,6 +693,7 @@ const DEFAULTS = {
   split_target: 'largest',
   max_tiles: 8,
   click: 'new-tile',
+  plus_new_tile: true,
   replace_modifier: 'alt',
   hint_dismissed: false
 }
@@ -1010,14 +1022,31 @@ function createController(ctx) {
       tick()
     })
 
-  function newTile() {
+  function newTile(anchor) {
     if (typeof host.layout?.newChatTile !== 'function') {
       host.notify({ kind: 'info', message: `Tiled Sessions: new chat tiles need ${NEEDS}.` })
       return
     }
-    insertAfter = focusedGroup()
+    const pane = anchor ?? focusedPane() ?? 'workspace'
+    insertAfter = groupIdOfPane(layout()?.root ?? null, pane) ?? focusedGroup()
     newTileAt = Date.now()
-    host.layout.newChatTile({ pane: focusedPane() ?? 'workspace', pos: 'right' })
+    host.layout.newChatTile({ pane, pos: 'right' })
+  }
+
+  /** The "+" at the end of a chat zone's tab strip: core stacks a new session
+   *  tab there. With plus_new_tile on, open it as a new tile beside that zone
+   *  instead. Capture phase, so core's handler never runs for the clicks we take. */
+  function onStripPlus(e) {
+    if (!$settings.get().plus_new_tile || e.button !== 0) return
+    const btn = e.target?.closest?.('button')
+    if (!btn || !btn.querySelector('.codicon-add') || btn.closest('[data-tree-tab]')) return
+    const strip = btn.closest('[data-zone-tabstrip]')
+    const group = groupById(layout()?.root ?? null, strip?.getAttribute('data-zone-tabstrip'))
+    // Only a strip whose active tab is a chat: there the "+" mints a session.
+    if (!group || !isSessionPane(group.active)) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    newTile(group.active)
   }
 
   function close(storedId) {
@@ -1268,6 +1297,7 @@ function createController(ctx) {
   }
 
   return {
+    onStripPlus,
     retileAll: () => retile({ force: true }),
     $settings,
     $openedHere,
@@ -2224,6 +2254,14 @@ function makeSettings(ctl, ctx) {
           : null,
         jsx(SettingsHeading, { children: 'Opening sessions' }),
         jsx(ToggleRow, {
+          label: 'Tab-strip + opens a new tile',
+          description: hasTiling()
+            ? 'The + after a chat\u2019s tabs opens a new session as its own tile. Off: it stacks a new tab, like stock Hermes.'
+            : `Needs ${NEEDS}.`,
+          checked: s.plus_new_tile && hasTiling(),
+          onChange: on => ctl.setSettings({ plus_new_tile: on })
+        }),
+        jsx(ToggleRow, {
           label: 'Click opens a new tile',
           description: 'Off: a click replaces the focused chat, like stock Hermes.',
           checked: s.click === 'new-tile',
@@ -2303,6 +2341,10 @@ export default {
       ctl.onLayout()
       // Re-tile after core finishes its own write (a microtask later), never inside it.
       ctx.onDispose(host.state.sessionLayout.listen(() => queueMicrotask(() => ctl.onLayout())))
+    }
+    if (hasTiling()) {
+      window.addEventListener('click', ctl.onStripPlus, true)
+      ctx.onDispose(() => window.removeEventListener('click', ctl.onStripPlus, true))
     }
     const invalidate = () => void queryClient.invalidateQueries({ queryKey: LIST_KEY })
     ctx.onEvent('sessions.changed', invalidate)

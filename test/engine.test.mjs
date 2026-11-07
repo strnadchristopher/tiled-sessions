@@ -605,3 +605,11 @@ describe('keybind display', () => {
     assert.equal(arrowKeys(['ctrl+alt+left', null, 'ctrl+alt+up', 'ctrl+alt+down']), null)
   })
 })
+
+it('groupById finds a nested group and misses cleanly', async () => {
+  const { groupById } = await import('../src/engine.mjs')
+  const root = { type: 'split', children: [{ type: 'group', id: 'a', panes: ['workspace'], active: 'workspace' }, { type: 'split', children: [{ type: 'group', id: 'b', panes: ['session-tile:x'], active: 'session-tile:x' }] }] }
+  assert.equal(groupById(root, 'b').active, 'session-tile:x')
+  assert.equal(groupById(root, 'zz'), null)
+  assert.equal(groupById(null, 'a'), null)
+})
