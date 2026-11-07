@@ -754,6 +754,9 @@ function createController(ctx) {
   const $fullscreen = atom(ctx.storage.get('fullscreen', null) || null)
   // The workspace picker (palette / keybind) is open.
   const $picker = atom(false)
+  // A workspace just saved by keybind, for the pane to open in rename. Panes mounted: tilesPanes.
+  const $renameWs = atom(null)
+  let tilesPanes = 0
   // Stock Hermes only: what this plugin opened this run (core layout is unreadable there).
   const $openedHere = atom([])
   let lastKey = null
@@ -1272,6 +1275,12 @@ function createController(ctx) {
     $workspaces,
     $fullscreen,
     $picker,
+    $renameWs,
+    paneMounted: () => {
+      tilesPanes += 1
+      return () => void (tilesPanes -= 1)
+    },
+    hasPane: () => tilesPanes > 0,
     setSettings,
     setLayout,
     setLayoutOffered,
@@ -1893,6 +1902,13 @@ function makePane(ctl) {
     const { open, pinnedIds } = tiling ? useOpen() : useOpenStock()
     const [query, setQuery] = useState('')
     const [editingWs, setEditingWs] = useState(null)
+    const renameWs = useValue(ctl.$renameWs)
+    useEffect(() => ctl.paneMounted(), [])
+    useEffect(() => {
+      if (!renameWs) return
+      setEditingWs(renameWs)
+      ctl.$renameWs.set(null)
+    }, [renameWs])
     const [drag, setDrag] = useState(null) // { id, over, after }
     const rows = data?.sessions ?? []
     const byKey = new Map()
@@ -2010,7 +2026,7 @@ function makePane(ctl) {
               )
             })
           : null,
-        shownRest.length || !searching
+        shownRest.length
           ? jsx(Section, { label: 'Sessions', children: shownRest.map(r => sessionRow('s', rowId(r), r)) })
           : null
       ]
@@ -2036,7 +2052,10 @@ const ACTIONS = [
   ['equalize', 'Re-tile and reset sizes', ['ctrl+alt+r'], c => c.equalizeAll()],
   ['save-workspace', 'Save open tiles as a workspace', ['ctrl+alt+s'], c => {
     const ws = c.saveWorkspace()
-    if (ws) host.notify({ kind: 'success', message: `Saved ${ws.name}. Rename it in the Tiles pane.` })
+    if (!ws) return
+    // With the Tiles pane on screen, open the new row straight into rename.
+    if (c.hasPane()) c.$renameWs.set(ws.id)
+    else host.notify({ kind: 'success', message: `Saved ${ws.name}. Rename it in the Tiles pane.` })
   }],
   ['restore-workspace', 'Restore workspace…', ['ctrl+alt+o'], c => c.openPicker()],
   ['show-shortcuts', 'Show shortcuts', [], c => c.showShortcuts()],
