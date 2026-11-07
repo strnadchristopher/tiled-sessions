@@ -1,10 +1,11 @@
-// Tiled Sessions — Hyprland-style tiling for Hermes Desktop sessions.
+// Tiled Sessions: Hyprland-style tiling for Hermes Desktop sessions.
 //
 // GENERATED: desktop/plugin.js is this file with src/engine.mjs inlined at the
 // ENGINE marker by scripts/build.mjs. Edit src/, then `npm run build`.
 // SDK-only: imports @hermes/plugin-sdk and react/jsx-runtime, nothing else.
-// Newer SDK exports (KeybindEditor) are read off the namespace so the plugin
-// still loads, with fallbacks, on a Desktop that predates them.
+// Newer SDK exports (KeybindEditor, SearchField, ContextMenu, Switch, Kbd,
+// Dialog) are read off the namespace so the plugin still loads, with
+// fallbacks, on a Desktop that predates them.
 
 import {
   Codicon,
@@ -22,6 +23,7 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 import * as SDK from '@hermes/plugin-sdk'
+import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 /* ENGINE:BEGIN */
@@ -402,8 +404,36 @@ function arrangement(layout, panes, area, { masterRatio = 0.55 } = {}) {
   return column(lines.filter(l => l))
 }
 
-/** Next layout in LAYOUTS after `current`. */
-const nextLayout = current => LAYOUTS[(LAYOUTS.indexOf(current) + 1) % LAYOUTS.length]
+/** The user's enabled layouts in LAYOUTS order; never empty (all on when
+ *  nothing valid is stored). */
+function enabledLayouts(list) {
+  const on = Array.isArray(list) ? LAYOUTS.filter(id => list.includes(id)) : []
+  return on.length ? on : [...LAYOUTS]
+}
+
+/** Next enabled layout after `current` in LAYOUTS order. `current` itself
+ *  need not be enabled (it was just switched off, or picked from the palette). */
+function nextLayout(current, enabled = LAYOUTS) {
+  const on = enabledLayouts(enabled)
+  const at = LAYOUTS.indexOf(current)
+  for (let i = 1; i <= LAYOUTS.length; i++) {
+    const id = LAYOUTS[(at + i + LAYOUTS.length) % LAYOUTS.length]
+    if (on.includes(id)) return id
+  }
+  return on[0]
+}
+
+/** Switch one layout on or off. The last enabled layout stays on. */
+function setLayoutEnabled(enabled, id, on) {
+  const now = enabledLayouts(enabled)
+  if (!LAYOUTS.includes(id)) return now
+  if (on) return enabledLayouts([...now, id])
+  return now.length > 1 ? now.filter(l => l !== id) : now
+}
+
+/** The layout to show once `enabled` changes: `current` when still enabled,
+ *  else the next enabled one. */
+const keepEnabled = (current, enabled) => (enabledLayouts(enabled).includes(current) ? current : nextLayout(current, enabled))
 
 /** Move `id` to the front (master). */
 const promote = (order, id) => (order.includes(id) ? [id, ...order.filter(o => o !== id)] : order)
@@ -417,6 +447,169 @@ function swapOrder(order, p, q) {
   next[i] = q
   next[j] = p
   return next
+}
+
+/** Move `id` next to `target` in `order`: before it, or after it with `after`. */
+function moveNextTo(order, id, target, after = false) {
+  if (id === target || !order.includes(id) || !order.includes(target)) return order
+  const rest = order.filter(o => o !== id)
+  const at = rest.indexOf(target) + (after ? 1 : 0)
+  return [...rest.slice(0, at), id, ...rest.slice(at)]
+}
+
+/** `items` sorted by where `keyOf(item)` sits in `order`; unknown keys keep
+ *  their relative order at the end. Stable. */
+function sortByOrder(items, order, keyOf) {
+  const rank = item => {
+    const at = order.indexOf(keyOf(item))
+    return at === -1 ? Number.MAX_SAFE_INTEGER : at
+  }
+  return items.map((item, i) => [item, i]).sort((p, q) => rank(p[0]) - rank(q[0]) || p[1] - q[1]).map(([item]) => item)
+}
+
+/**
+ * Fullscreen: `focused` fills the chat area and every other tile folds into a
+ * thin strip along the bottom (`peek` px per strip row, as many tiles per row
+ * as fit at `minTileW`). Core can't minimize a zone for a plugin, and a tile
+ * may not leave the arrangement, so the strip keeps them all on screen.
+ */
+function fullscreenArrangement(panes, focused, area, { minTileW = 320, peek = 36 } = {}) {
+  if (!panes.includes(focused)) return null
+  const others = panes.filter(p => p !== focused).map(leafOf)
+  if (!others.length) return leafOf(focused)
+  const cols = Math.max(1, Math.min(others.length, Math.floor(area.w / minTileW)))
+  const lines = []
+  for (let i = 0; i < others.length; i += cols) lines.push(row(others.slice(i, i + cols)))
+  const strip = Math.min(area.h * 0.4, peek * lines.length)
+  return { orientation: 'column', weights: [area.h - strip, strip], children: [leafOf(focused), column(lines)] }
+}
+
+/**
+ * Master share of the chat area as the user left it (sash drag), read from
+ * core's weights: the split that directly holds the master zone, master's
+ * weight over every chat-holding child of that split. Null when the tree
+ * isn't master-shaped (one tile, or master stacked inside another zone).
+ */
+function masterRatioFromCore(coreRoot, masterGroupId, isChat = isSessionPane) {
+  const find = n => {
+    if (!n || n.type === 'group') return null
+    if (n.children.some(c => c.type === 'group' && c.id === masterGroupId)) return n
+    for (const c of n.children) {
+      const hit = find(c)
+      if (hit) return hit
+    }
+    return null
+  }
+  const parent = find(coreRoot)
+  if (!parent) return null
+  let master = 0
+  let chat = 0
+  parent.children.forEach((c, i) => {
+    if (!holdsChat(c, isChat)) return
+    chat += parent.weights[i] ?? 0
+    if (c.type === 'group' && c.id === masterGroupId) master = parent.weights[i] ?? 0
+  })
+  if (!(chat > 0) || master === chat) return null
+  return master / chat
+}
+
+/** Ratio kept within the range the master layout honours, to 2 decimals. */
+const clampRatio = r => Math.round(Math.min(0.85, Math.max(0.15, r)) * 100) / 100
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/** Every whitespace-separated term of `query` appears (case-insensitive) in
+ *  the row's title or preview. An empty query matches everything. */
+function matchesQuery(row, query) {
+  const terms = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return true
+  const hay = `${row?.title ?? ''} ${row?.preview ?? ''}`.toLowerCase()
+  return terms.every(t => hay.includes(t))
+}
+
+// ---------------------------------------------------------------------------
+// Saved workspaces
+// ---------------------------------------------------------------------------
+
+/** A workspace: name, layout and the stored session ids in tile order. */
+function makeWorkspace(name, layout, sessionIds, now = Date.now()) {
+  const sessions = [...new Set(sessionIds.filter(Boolean))]
+  return { id: `ws-${now.toString(36)}`, name: String(name).trim() || 'Workspace', layout: LAYOUTS.includes(layout) ? layout : LAYOUTS[0], sessions }
+}
+
+/** Parse stored workspaces, dropping anything malformed. */
+function readWorkspaces(raw) {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(w => w && typeof w.id === 'string' && typeof w.name === 'string' && Array.isArray(w.sessions))
+    .map(w => ({ id: w.id, name: w.name, layout: LAYOUTS.includes(w.layout) ? w.layout : LAYOUTS[0], sessions: w.sessions.filter(s => typeof s === 'string') }))
+}
+
+/** `base`, or `base 2`, `base 3`… so it doesn't clash with `names`. */
+function uniqueName(base, names) {
+  const taken = new Set(names.map(n => n.toLowerCase()))
+  if (!taken.has(base.toLowerCase())) return base
+  for (let i = 2; ; i++) if (!taken.has(`${base} ${i}`.toLowerCase())) return `${base} ${i}`
+}
+
+/**
+ * What restoring a workspace has to do, given what's on screen now.
+ *  wanted     the workspace's sessions that still exist, capped at maxTiles
+ *  close      tile panes showing something the workspace doesn't hold
+ *  inPlace    a session to load into main when main shows something else
+ *             (main can't close; it is reused instead)
+ *  openTiles  sessions to open as new tiles, in order
+ * `open` is openSessions() output; `exists` filters deleted sessions.
+ */
+function planRestore({ sessions, open, mainStoredSessionId = null, exists = () => true, maxTiles = Infinity }) {
+  const wanted = sessions.filter(exists).slice(0, Math.max(1, maxTiles))
+  const want = new Set(wanted)
+  const close = open.filter(o => o.paneId !== 'workspace' && !want.has(o.storedSessionId)).map(o => o.paneId)
+  const onScreen = new Set(open.filter(o => o.paneId === 'workspace' || want.has(o.storedSessionId)).map(o => o.storedSessionId))
+  let inPlace = null
+  if (!mainStoredSessionId || !want.has(mainStoredSessionId)) {
+    inPlace = wanted.find(id => !onScreen.has(id)) ?? null
+    // Nothing new to load into main: close it like its tab's ✕ (core
+    // promotes a neighbour tile), so only the workspace stays open.
+    if (!inPlace && mainStoredSessionId && wanted.length) close.push('workspace')
+  }
+  const openTiles = wanted.filter(id => id !== inPlace && !onScreen.has(id))
+  return { wanted, close, inPlace, openTiles }
+}
+
+// ---------------------------------------------------------------------------
+// Keybind display
+// ---------------------------------------------------------------------------
+
+/** The user's live combos for `actionId`: their stored override (core keeps
+ *  only the diff from defaults; [] = unbound), else the shipped defaults. */
+function liveCombos(overrides, actionId, defaults = []) {
+  const own = overrides && Object.prototype.hasOwnProperty.call(overrides, actionId) ? overrides[actionId] : null
+  return Array.isArray(own) ? own.filter(c => typeof c === 'string') : defaults
+}
+
+const KEY_LABELS = { left: '←', right: '→', up: '↑', down: '↓', enter: '↵', space: 'Space', escape: 'Esc', backspace: '⌫', tab: '⇥' }
+const MOD_LABELS = { mac: { mod: '⌘', ctrl: '⌃', alt: '⌥', shift: '⇧' }, other: { mod: 'Ctrl', ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift' } }
+
+/** One key-cap label per token: `ctrl+alt+left` → ['Ctrl', 'Alt', '←']. */
+function comboKeys(combo, mac = false) {
+  const parts = String(combo).split('+')
+  const base = parts.pop() ?? ''
+  const mods = MOD_LABELS[mac ? 'mac' : 'other']
+  const label = KEY_LABELS[base] ?? (/^f\d{1,2}$/.test(base) || base.length === 1 ? base.toUpperCase() : base)
+  return [...parts.map(m => mods[m] ?? m), label]
+}
+
+/** Four directional combos that differ only in their arrow collapse to one
+ *  row of caps: ['Ctrl', 'Alt', '←↑↓→']. Null when they don't line up. */
+function arrowKeys(combos, mac = false) {
+  const keys = combos.map(c => (c ? comboKeys(c, mac) : null))
+  if (keys.some(k => !k)) return null
+  const mods = keys.map(k => k.slice(0, -1).join('+'))
+  if (new Set(mods).size !== 1) return null
+  return [...keys[0].slice(0, -1), keys.map(k => k[k.length - 1]).join('')]
 }
 
 /** Leaf rects of an arrangement spec (equal weights unless given). */
@@ -477,15 +670,20 @@ function rowDetails(session) {
 /* ENGINE:END */
 
 const ID = 'tiled-sessions'
+const PANE_ID = `${ID}:pane`
 const NEEDS = 'a Hermes Desktop with the session-layout SDK (host.state.sessionLayout)'
+const MASTER_PRESETS = [0.5, 0.55, 0.6, 0.66]
 const DEFAULTS = {
   layout: 'grid',
+  layouts_enabled: [...LAYOUTS],
   master_ratio: 0.55,
+  master_preset: 0.55,
   auto_tile: true,
   split_target: 'largest',
   max_tiles: 8,
   click: 'new-tile',
-  replace_modifier: 'alt'
+  replace_modifier: 'alt',
+  hint_dismissed: false
 }
 const LAYOUT_INFO = {
   grid: { label: 'Grid', blurb: 'Every tile the same size.' },
@@ -495,21 +693,68 @@ const LAYOUT_INFO = {
 }
 const LIST_KEY = [ID, 'session.list']
 const SIDEBAR_ESTIMATE = 280
+// Core keeps the user's keybind overrides here (only the diff from defaults).
+// No SDK reader exists for live bindings, so the shortcuts card reads it and
+// falls back to our shipped defaults when it is absent or unreadable.
+const KEYBINDS_STORAGE = 'hermes.desktop.keybinds'
 
 /** The upstream hook ships `dock`, `sessionLayout` and `host.layout` together. */
 const hasTiling = () => Boolean(host.state?.sessionLayout && typeof host.layout?.closePane === 'function')
 /** Layouts need `host.layout.arrangeSessions` (same upstream PR, later revision). */
 const canArrange = () => hasTiling() && typeof host.layout?.arrangeSessions === 'function'
-const KeybindEditor = SDK.KeybindEditor
+const canPin = () => typeof host.sessions?.pin === 'function'
+/** Rename goes through the gateway's session.title RPC, which needs the
+ *  session's live runtime id: SDK builds that expose the focused one. */
+const canRenameAtAll = () => typeof host.request === 'function' && Boolean(host.state?.focusedSessionId)
 
-const rowId = row => row.id
-const rowKeys = row => [row.id, row._lineage_root_id].filter(Boolean)
+const KeybindEditor = SDK.KeybindEditor
+const SearchField = SDK.SearchField
+const Switch = SDK.Switch
+const Kbd = SDK.Kbd
+const ContextMenu = SDK.ContextMenu
+const ContextMenuTrigger = SDK.ContextMenuTrigger
+const ContextMenuContent = SDK.ContextMenuContent
+const ContextMenuItem = SDK.ContextMenuItem
+const ContextMenuSeparator = SDK.ContextMenuSeparator
+const Dialog = SDK.Dialog
+const DialogContent = SDK.DialogContent
+const DialogHeader = SDK.DialogHeader
+const DialogTitle = SDK.DialogTitle
+const hasContextMenu = Boolean(ContextMenu && ContextMenuTrigger && ContextMenuContent && ContextMenuItem)
+const hasDialog = Boolean(Dialog && DialogContent && DialogHeader && DialogTitle)
+const IS_MAC = typeof SDK.formatModifierToken === 'function' && SDK.formatModifierToken('alt') === '⌥'
+
+const rowId = r => r.id
+const rowKeys = r => [r.id, r._lineage_root_id].filter(Boolean)
+const notifyError = (err, message) =>
+  typeof host.notifyError === 'function' ? host.notifyError(err, message) : host.notify({ kind: 'error', message })
+
+async function listRows() {
+  // The gateway lists running sessions (default scope) and resumable history
+  // (`scope: 'stored'`) separately; an open chat is only in the first.
+  const [live, stored] = await Promise.all([
+    host.request('session.list', { limit: 200 }).catch(() => ({ sessions: [] })),
+    host.request('session.list', { limit: 200, scope: 'stored' }).catch(() => ({ sessions: [] }))
+  ])
+  return { sessions: mergeSessionRows(live?.sessions, stored?.sessions) }
+}
 
 function createController(ctx) {
   const stored = ctx.storage.get('settings', {}) || {}
-  const $settings = atom({ ...DEFAULTS, ...stored, layout: LAYOUTS.includes(stored.layout) ? stored.layout : DEFAULTS.layout })
+  const enabled0 = enabledLayouts(stored.layouts_enabled)
+  const $settings = atom({
+    ...DEFAULTS,
+    ...stored,
+    layouts_enabled: enabled0,
+    layout: LAYOUTS.includes(stored.layout) ? stored.layout : keepEnabled(DEFAULTS.layout, enabled0)
+  })
   const $history = atom(ctx.storage.get('history', []) || [])
   const $order = atom(ctx.storage.get('order', []) || [])
+  const $workspaces = atom(readWorkspaces(ctx.storage.get('workspaces', [])))
+  // Group id of the zone shown fullscreen, or null.
+  const $fullscreen = atom(ctx.storage.get('fullscreen', null) || null)
+  // The workspace picker (palette / keybind) is open.
+  const $picker = atom(false)
   // Stock Hermes only: what this plugin opened this run (core layout is unreadable there).
   const $openedHere = atom([])
   let lastKey = null
@@ -517,6 +762,8 @@ function createController(ctx) {
   let warned = false
   let newTileAt = 0
   let lastZones = []
+  let restoring = false
+  let cancelRatioWrite = null
 
   const setSettings = patch => {
     const next = { ...$settings.get(), ...patch }
@@ -527,6 +774,16 @@ function createController(ctx) {
   const setOrder = next => {
     $order.set(next)
     ctx.storage.set('order', next)
+  }
+
+  const setFullscreen = groupId => {
+    $fullscreen.set(groupId)
+    ctx.storage.set('fullscreen', groupId)
+  }
+
+  const setWorkspaces = next => {
+    $workspaces.set(next)
+    ctx.storage.set('workspaces', next)
   }
 
   const layout = () => (hasTiling() ? host.state.sessionLayout.get() : null)
@@ -540,14 +797,6 @@ function createController(ctx) {
 
   const focusedPane = () => paneOf(host.state.focusedStoredSessionId.get())
   const focusedGroup = () => groupIdOfPane(layout()?.root ?? null, focusedPane())
-
-  const noteFocus = storedId => {
-    const paneId = paneOf(storedId)
-    if (!paneId) return
-    const next = touch($history.get(), paneId)
-    $history.set(next)
-    ctx.storage.set('history', next)
-  }
 
   /** Engine tree of the chat panes + the area they fill. Only the aspect ratio
    *  matters (wide → side by side, tall → stacked), so window minus sidebar is enough. */
@@ -564,6 +813,7 @@ function createController(ctx) {
    * Re-tile every chat with the current layout. Auto-tiling runs this whenever
    * the SET of open tiles changes (open, close, ⌘W, drag-out); a drag or sash
    * resize that keeps the set is left alone. `force` re-tiles regardless.
+   * Any re-tile ends fullscreen.
    */
   function retile({ force = false } = {}) {
     if (!canArrange()) return false
@@ -575,6 +825,8 @@ function createController(ctx) {
     insertAfter = null
     if (order.join() !== $order.get().join()) setOrder(order)
     lastKey = key
+    lastZones = zones
+    if ($fullscreen.get()) setFullscreen(null)
     if (zones.length < 2) return true
     const s = $settings.get()
     const paneOfGroup = new Map(zones.map(z => [z.groupId, z.pane]))
@@ -587,19 +839,70 @@ function createController(ctx) {
     return ok
   }
 
+  /** Fill the chat area with zone `groupId`; the rest fold into a strip. */
+  function arrangeFullscreen(groupId) {
+    const zones = chatZones(layout()?.root ?? null)
+    const zone = zones.find(z => z.groupId === groupId)
+    if (!zone || zones.length < 2) return false
+    const order = reconcileOrder($order.get(), zones.map(z => z.groupId))
+    const paneOfGroup = new Map(zones.map(z => [z.groupId, z.pane]))
+    const spec = fullscreenArrangement(order.map(g => paneOfGroup.get(g)), zone.pane, engineView().area)
+    if (!spec || !host.layout.arrangeSessions(spec)) return false
+    setFullscreen(groupId)
+    return true
+  }
+
+  function toggleFullscreen() {
+    if (!canArrange()) {
+      host.notify({ kind: 'info', message: `Tiled Sessions: fullscreen needs ${NEEDS} with arrangeSessions.` })
+      return
+    }
+    if ($fullscreen.get()) {
+      retile({ force: true })
+      return
+    }
+    const g = focusedGroup()
+    if (g) arrangeFullscreen(g)
+  }
+
+  /** Master layout: keep the divider where the user dragged it. Debounced so
+   *  a live sash drag writes settings once, after it settles. */
+  function rememberMasterRatio() {
+    const s = $settings.get()
+    if (s.layout !== 'master' || !s.auto_tile || $fullscreen.get() || restoring) return
+    cancelRatioWrite?.()
+    cancelRatioWrite = ctx.setTimeout(() => {
+      cancelRatioWrite = null
+      const master = $order.get()[0]
+      const r = master ? masterRatioFromCore(layout()?.root ?? null, master) : null
+      if (r === null) return
+      const next = clampRatio(r)
+      if (Math.abs(next - $settings.get().master_ratio) >= 0.01) setSettings({ master_ratio: next })
+    }, 300)
+  }
+
   /** Called on every layout change: auto-tile when the set of tiles changed. */
   function onLayout() {
     if (!canArrange()) return
-    const key = zoneKey(chatZones(layout()?.root ?? null))
+    const zones = chatZones(layout()?.root ?? null)
+    const key = zoneKey(zones)
     if (lastKey === null) {
       // First sight after load: adopt what's on screen (keep the user's sizes).
       lastKey = key
-      lastZones = chatZones(layout()?.root ?? null)
-      setOrder(reconcileOrder($order.get(), lastZones.map(z => z.groupId)))
+      lastZones = zones
+      setOrder(reconcileOrder($order.get(), zones.map(z => z.groupId)))
+      if ($fullscreen.get() && !zones.some(z => z.groupId === $fullscreen.get())) setFullscreen(null)
       return
     }
-    if (key === lastKey) return
-    const zones = chatZones(layout()?.root ?? null)
+    if (key === lastKey) {
+      rememberMasterRatio()
+      return
+    }
+    if (restoring) {
+      lastKey = key
+      lastZones = zones
+      return
+    }
     const added = zones.filter(z => !lastZones.some(o => o.groupId === z.groupId))
     lastZones = zones
     const closed = key.split(',').length < lastKey.split(',').length
@@ -609,7 +912,9 @@ function createController(ctx) {
       const id = storedIdOfPane(added[0].pane, layout().mainStoredSessionId)
       if (id) ctx.setTimeout(() => host.composer?.focus?.(id), 80)
     }
-    if ($settings.get().auto_tile) retile()
+    // Opening or closing a tile ends fullscreen and brings the layout back.
+    if ($fullscreen.get()) retile({ force: true })
+    else if ($settings.get().auto_tile) retile()
     else lastKey = key
     // A tile closed (ours, ⌘W, its ✕): core moves the highlight, but the caret
     // can stay on a different tile. Re-sync so typing and ⌘W follow the highlight.
@@ -619,6 +924,18 @@ function createController(ctx) {
         if (id) host.composer?.focus?.(id)
       }, 60)
     }
+  }
+
+  const noteFocus = storedId => {
+    const paneId = paneOf(storedId)
+    if (!paneId) return
+    const next = touch($history.get(), paneId)
+    $history.set(next)
+    ctx.storage.set('history', next)
+    // Fullscreen follows focus: clicking a tile in the strip brings it up.
+    const fs = $fullscreen.get()
+    const g = focusedGroup()
+    if (fs && g && g !== fs && canArrange()) arrangeFullscreen(g)
   }
 
   /** Focus an on-screen session the way a tiling WM does: front its tile AND
@@ -637,7 +954,7 @@ function createController(ctx) {
       return
     }
     if (!hasTiling()) {
-      // Stock Hermes: core focuses an open tile or stacks a tab — never a duplicate.
+      // Stock Hermes: core focuses an open tile or stacks a tab, never a duplicate.
       await host.openSession(storedId, { intent: 'tab' })
       if (!$openedHere.get().some(o => o.storedSessionId === storedId)) {
         $openedHere.set([...$openedHere.get(), { paneId: null, storedSessionId: storedId, visible: true }])
@@ -645,8 +962,8 @@ function createController(ctx) {
       return
     }
     const { l, tree, area } = engineView()
-    const open = openSessions(l.root, l.mainStoredSessionId)
-    if (open.some(o => o.storedSessionId === storedId)) {
+    const onScreen = openSessions(l.root, l.mainStoredSessionId)
+    if (onScreen.some(o => o.storedSessionId === storedId)) {
       await focusTile(storedId) // already on screen → focus it
       return
     }
@@ -654,8 +971,8 @@ function createController(ctx) {
       await host.openSession(storedId, { intent: 'in-place' }) // blank main → spend it
       return
     }
-    if (open.length >= s.max_tiles) {
-      host.notify({ kind: 'info', message: `Tiled Sessions: ${s.max_tiles} tiles open — opened in place instead.` })
+    if (onScreen.length >= s.max_tiles) {
+      host.notify({ kind: 'info', message: `Tiled Sessions: ${s.max_tiles} tiles are open, so it opened in place.` })
       await host.openSession(storedId, { intent: 'in-place' })
       return
     }
@@ -669,7 +986,7 @@ function createController(ctx) {
     focusOnceTiled(storedId)
   }
 
-  /** Like a tiling WM, focus the new tile — once core has adopted it (async).
+  /** Like a tiling WM, focus the new tile, once core has adopted it (async).
    *  Re-opening an on-screen session only focuses it, so this never stacks. */
   function focusOnceTiled(storedId, tries = 12) {
     if (paneOf(storedId)) {
@@ -678,6 +995,18 @@ function createController(ctx) {
     }
     if (tries > 0) ctx.setTimeout(() => focusOnceTiled(storedId, tries - 1), 100)
   }
+
+  /** Resolve once `test()` holds, or false after `ms`. */
+  const waitFor = (test, ms = 3000, step = 80) =>
+    new Promise(resolve => {
+      const started = Date.now()
+      const tick = () => {
+        if (test()) resolve(true)
+        else if (Date.now() - started > ms) resolve(false)
+        else ctx.setTimeout(tick, step)
+      }
+      tick()
+    })
 
   function newTile() {
     if (typeof host.layout?.newChatTile !== 'function') {
@@ -727,6 +1056,18 @@ function createController(ctx) {
     if (id) ctx.setTimeout(() => void focusTile(id), 50)
   }
 
+  /** Drag-and-drop in the Open list: put `storedId`'s tile next to `targetId`'s. */
+  function moveTile(storedId, targetId, after) {
+    if (!canArrange()) return
+    const root = layout()?.root ?? null
+    const from = groupIdOfPane(root, paneOf(storedId))
+    const to = groupIdOfPane(root, paneOf(targetId))
+    if (!from || !to || from === to) return
+    const order = reconcileOrder($order.get(), chatZones(root).map(z => z.groupId))
+    setOrder(moveNextTo(order, from, to, after))
+    retile({ force: true })
+  }
+
   function promoteFocused() {
     const g = focusedGroup()
     if (!g || !canArrange()) return
@@ -743,10 +1084,32 @@ function createController(ctx) {
     if (announce && !canArrange()) host.notify({ kind: 'info', message: `Tiles: ${LAYOUT_INFO[next].label}` })
   }
 
-  const cycleLayout = () => setLayout(nextLayout($settings.get().layout), { announce: true })
+  const cycleLayout = () => {
+    const s = $settings.get()
+    setLayout(nextLayout(s.layout, s.layouts_enabled), { announce: true })
+  }
 
+  /** Offer a layout (or stop offering it) in the switcher, chip and cycle. */
+  function setLayoutOffered(id, on) {
+    const s = $settings.get()
+    const next = setLayoutEnabled(s.layouts_enabled, id, on)
+    setSettings({ layouts_enabled: next })
+    const keep = keepEnabled(s.layout, next)
+    if (keep !== s.layout) setLayout(keep)
+  }
+
+  /** Pick a master size preset; a dragged (custom) size is replaced by it. */
+  function setMasterPreset(r) {
+    setSettings({ master_ratio: r, master_preset: r })
+    setLayout('master')
+  }
+
+  /** Ctrl+Alt+R: re-tile, and drop sizes dragged by hand, including a
+   *  remembered master size (back to the last preset picked in Settings). */
   function equalizeAll() {
     if (!hasTiling()) return
+    const s = $settings.get()
+    if (s.master_ratio !== s.master_preset) setSettings({ master_ratio: s.master_preset })
     if (canArrange()) {
       retile({ force: true })
       return
@@ -754,16 +1117,166 @@ function createController(ctx) {
     for (const [splitId, weights] of equalizePlan(layout().root, isSessionPane)) host.layout.setSplitWeights(splitId, weights)
   }
 
-  function openInPlace() {
-    const id = host.state.focusedStoredSessionId.get()
-    if (id) void host.openSession(id, { intent: 'main' })
+  function openInPlace(storedId = host.state.focusedStoredSessionId.get()) {
+    if (storedId) void host.openSession(storedId, { intent: 'main' })
+  }
+
+  function setPinned(storedId, pinned) {
+    if (canPin()) host.sessions.pin(storedId, pinned)
+  }
+
+  /** Rename can only reach a session with a live runtime: one on screen. */
+  const canRename = storedId => canRenameAtAll() && (hasTiling() ? Boolean(paneOf(storedId)) : host.state.focusedStoredSessionId.get() === storedId)
+
+  /** Mirrors core's rename: the gateway's session.title RPC on the session's
+   *  runtime id (the sidebar's path for live sessions). The runtime id the SDK
+   *  exposes is the focused chat's, so focus the tile first when needed. */
+  async function rename(storedId, title) {
+    const next = String(title ?? '').trim()
+    if (!next || !canRename(storedId)) return false
+    const focusedRuntime = () => (host.state.focusedStoredSessionId.get() === storedId ? host.state.focusedSessionId.get() : null)
+    if (!focusedRuntime()) {
+      await focusTile(storedId)
+      await waitFor(() => Boolean(focusedRuntime()), 2000)
+    }
+    const runtimeId = focusedRuntime()
+    if (!runtimeId) {
+      host.notify({ kind: 'error', message: 'Could not rename: the session is still starting.' })
+      return false
+    }
+    try {
+      await host.request('session.title', { session_id: runtimeId, title: next })
+      void queryClient.invalidateQueries({ queryKey: LIST_KEY })
+      return true
+    } catch (err) {
+      notifyError(err, 'Could not rename the session')
+      return false
+    }
+  }
+
+  // -- saved workspaces ------------------------------------------------------
+
+  /** Stored ids of the open tiles in tile order. */
+  function openInOrder() {
+    const l = layout()
+    if (!l) return []
+    const open = openSessions(l.root, l.mainStoredSessionId)
+    const order = $order.get()
+    const visible = open.filter(o => o.visible)
+    return sortByOrder(visible, order, o => groupIdOfPane(l.root, o.paneId)).map(o => o.storedSessionId)
+  }
+
+  /** Save what's on screen as a new workspace; returns it (null when empty). */
+  function saveWorkspace(name) {
+    const ids = openInOrder()
+    if (!ids.length) {
+      host.notify({ kind: 'info', message: 'Open a session first, then save it as a workspace.' })
+      return null
+    }
+    const all = $workspaces.get()
+    const ws = makeWorkspace(name || uniqueName('Workspace', all.map(w => w.name)), $settings.get().layout, ids)
+    setWorkspaces([...all, ws])
+    return ws
+  }
+
+  function updateWorkspace(id, patch) {
+    setWorkspaces($workspaces.get().map(w => (w.id === id ? { ...w, ...patch } : w)))
+  }
+
+  /** Replace a workspace's tiles and layout with what's on screen now. */
+  function overwriteWorkspace(id) {
+    const ids = openInOrder()
+    if (ids.length) updateWorkspace(id, { sessions: ids, layout: $settings.get().layout })
+  }
+
+  const deleteWorkspace = id => setWorkspaces($workspaces.get().filter(w => w.id !== id))
+
+  async function knownSessionIds() {
+    try {
+      const data = await queryClient.fetchQuery({ queryKey: [...LIST_KEY, host.state.profile.get()], queryFn: listRows, staleTime: 30_000 })
+      const ids = new Set()
+      for (const r of data?.sessions ?? []) for (const k of rowKeys(r)) ids.add(k)
+      return ids
+    } catch {
+      return null
+    }
+  }
+
+  /** Open the workspace's sessions as tiles, in order, and apply its layout.
+   *  Sessions that no longer exist are skipped quietly. */
+  async function restoreWorkspace(id) {
+    const ws = $workspaces.get().find(w => w.id === id)
+    if (!ws || restoring) return
+    if (!canArrange()) {
+      host.notify({ kind: 'info', message: `Tiled Sessions: workspaces need ${NEEDS} with arrangeSessions.` })
+      return
+    }
+    const known = await knownSessionIds()
+    const l = layout()
+    const plan = planRestore({
+      sessions: ws.sessions,
+      open: openSessions(l.root, l.mainStoredSessionId),
+      mainStoredSessionId: l.mainStoredSessionId,
+      exists: storedId => !known || known.has(storedId) || Boolean(paneOf(storedId)),
+      maxTiles: $settings.get().max_tiles
+    })
+    if (!plan.wanted.length) {
+      host.notify({ kind: 'info', message: `None of the sessions in ${ws.name} exist any more.` })
+      return
+    }
+    restoring = true
+    setFullscreen(null)
+    try {
+      setSettings({ layout: ws.layout })
+      for (const pane of plan.close) host.layout.closePane(pane)
+      if (plan.inPlace) await host.openSession(plan.inPlace, { intent: 'in-place' })
+      for (const storedId of plan.openTiles) {
+        const prev = plan.wanted[plan.wanted.indexOf(storedId) - 1]
+        const anchor = (prev && paneOf(prev)) || focusedPane() || 'workspace'
+        await host.openSession(storedId, { intent: 'tab', dock: { pane: anchor, pos: 'right' } })
+        await waitFor(() => Boolean(paneOf(storedId)), 1500)
+      }
+      await waitFor(() => plan.wanted.every(s => paneOf(s)), 3000)
+    } finally {
+      restoring = false
+    }
+    const root = layout()?.root ?? null
+    const groups = plan.wanted.map(s => groupIdOfPane(root, paneOf(s))).filter(Boolean)
+    setOrder(reconcileOrder(groups, chatZones(root).map(z => z.groupId)))
+    retile({ force: true })
+    if (paneOf(plan.wanted[0])) void focusTile(plan.wanted[0])
+  }
+
+  function openPicker() {
+    const all = $workspaces.get()
+    if (!all.length) {
+      host.notify({ kind: 'info', message: 'No saved workspaces yet. Save one from the Open list in the Tiles pane.' })
+      return
+    }
+    if (all.length === 1 || !hasDialog) {
+      void restoreWorkspace(all[all.length - 1].id)
+      return
+    }
+    $picker.set(true)
+  }
+
+  function showShortcuts() {
+    setSettings({ hint_dismissed: false })
+    host.revealPane?.(PANE_ID)
   }
 
   return {
+    retileAll: () => retile({ force: true }),
     $settings,
     $openedHere,
+    $order,
+    $workspaces,
+    $fullscreen,
+    $picker,
     setSettings,
     setLayout,
+    setLayoutOffered,
+    setMasterPreset,
     noteFocus,
     onLayout,
     open,
@@ -771,28 +1284,29 @@ function createController(ctx) {
     close,
     focusDir,
     swapDir,
+    moveTile,
     promoteFocused,
     cycleLayout,
     equalizeAll,
-    openInPlace
+    toggleFullscreen,
+    openInPlace,
+    setPinned,
+    canRename,
+    rename,
+    paneOf,
+    saveWorkspace,
+    updateWorkspace,
+    overwriteWorkspace,
+    deleteWorkspace,
+    restoreWorkspace,
+    openPicker,
+    showShortcuts
   }
 }
 
 function useSessionRows() {
   const profile = useValue(host.state.profile)
-  return useQuery({
-    queryKey: [...LIST_KEY, profile],
-    // The gateway lists running sessions (default scope) and resumable history
-    // (`scope: 'stored'`) separately; an open chat is only in the first.
-    queryFn: async () => {
-      const [live, stored] = await Promise.all([
-        host.request('session.list', { limit: 200 }).catch(() => ({ sessions: [] })),
-        host.request('session.list', { limit: 200, scope: 'stored' }).catch(() => ({ sessions: [] }))
-      ])
-      return { sessions: mergeSessionRows(live?.sessions, stored?.sessions) }
-    },
-    staleTime: 30_000
-  })
+  return useQuery({ queryKey: [...LIST_KEY, profile], queryFn: listRows, staleTime: 30_000 })
 }
 
 // Session-list density (Settings → Appearance), read-only from core when the
@@ -800,36 +1314,154 @@ function useSessionRows() {
 const COMPACT = atom('compact')
 const densityAtom = () => host.state?.sessionListDensity ?? COMPACT
 const ROW_HEIGHT = { compact: 'h-7', comfortable: 'min-h-[2.75rem] py-1', detailed: 'min-h-[3.875rem] py-1' }
+const ACCENT_WASH = { background: 'color-mix(in srgb, var(--ui-accent) 14%, transparent)' }
 
-function Row({ storedId, title, session, focused, onOpen, onClose, dim }) {
+/** In-place title editor: Enter or blur saves, Escape cancels. */
+function InlineName({ value, onDone, label }) {
+  const [text, setText] = useState(value)
+  const ref = useRef(null)
+  const done = useRef(false)
+  useEffect(() => {
+    // After the context menu has closed and handed focus back.
+    const t = setTimeout(() => {
+      ref.current?.focus()
+      ref.current?.select()
+    }, 0)
+    return () => clearTimeout(t)
+  }, [])
+  const finish = save => {
+    if (done.current) return
+    done.current = true
+    onDone(save ? text.trim() : null)
+  }
+  return jsx('input', {
+    ref,
+    value: text,
+    'aria-label': label,
+    spellCheck: false,
+    className:
+      'block h-6 w-full min-w-0 rounded-[0.3rem] bg-(--ui-bg-elevated) px-1.5 text-[0.8125rem] text-foreground outline-none ring-1 ring-(--ui-accent)',
+    onChange: e => setText(e.target.value),
+    onClick: e => e.stopPropagation(),
+    onKeyDown: e => {
+      e.stopPropagation()
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        finish(true)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        finish(false)
+      }
+    },
+    onBlur: () => finish(true)
+  })
+}
+
+/** Right-click menu for a row: `items` are [icon, label, run] or 'sep'.
+ *  Leading/trailing/double separators are dropped. Renders the row alone on
+ *  Desktops without the SDK's ContextMenu. */
+function WithMenu({ items, label, onCloseAutoFocus, children }) {
+  const clean = items.filter(Boolean).filter((it, i, all) => it !== 'sep' || (i > 0 && i < all.length - 1 && all[i - 1] !== 'sep'))
+  if (!hasContextMenu || !clean.some(it => it !== 'sep')) return children
+  return jsxs(ContextMenu, {
+    children: [
+      jsx(ContextMenuTrigger, { asChild: true, children }),
+      jsx(ContextMenuContent, {
+        'aria-label': label,
+        className: 'w-44',
+        onCloseAutoFocus,
+        children: clean.map((it, i) =>
+          it === 'sep'
+            ? ContextMenuSeparator
+              ? jsx(ContextMenuSeparator, {}, `sep${i}`)
+              : null
+            : jsxs(
+                ContextMenuItem,
+                {
+                  variant: it[3] ? 'destructive' : undefined,
+                  onSelect: it[2],
+                  children: [jsx(Codicon, { name: it[0], className: 'text-[0.875rem]' }), it[1]]
+                },
+                it[1]
+              )
+        )
+      })
+    ]
+  })
+}
+
+function Row({ ctl, storedId, title, session, focused, dim, pinned, tile, onOpen, onClose, drag }) {
   const density = useValue(densityAtom())
+  const [renaming, setRenaming] = useState(false)
+  const keepFocus = useRef(false)
   const details = density === 'compact' ? null : rowDetails(session)
-  return jsxs('div', {
+  const renameable = ctl.canRename(storedId)
+  const startRename = () => {
+    keepFocus.current = true
+    setRenaming(true)
+  }
+  const items = [
+    canPin() ? [pinned ? 'pinned' : 'pin', pinned ? 'Unpin' : 'Pin', () => ctl.setPinned(storedId, !pinned)] : null,
+    renameable ? ['edit', 'Rename', startRename] : null,
+    'sep',
+    tile && hasTiling() && tile !== 'workspace' ? ['window', 'Move to main', () => ctl.openInPlace(storedId)] : null,
+    onClose || tile ? ['close', 'Close tile', () => (onClose ?? ctl.close)(storedId)] : null
+  ]
+  const row = jsxs('div', {
     className: cn(
-      'group relative flex cursor-pointer items-center gap-2 rounded-md pl-2.5 pr-1 text-[0.8125rem] transition-colors',
+      'group relative flex cursor-pointer items-center gap-2 rounded-md pl-2.5 pr-1 text-[0.8125rem] transition-[background-color,color,opacity]',
       ROW_HEIGHT[density] ?? ROW_HEIGHT.compact,
       focused ? 'text-foreground' : 'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-foreground',
-      dim && !focused && 'opacity-60'
+      dim && !focused && 'opacity-60',
+      drag?.dragging && 'opacity-40'
     ),
     role: 'button',
     tabIndex: 0,
     'aria-current': focused ? 'true' : undefined,
-    style: focused ? { background: 'color-mix(in srgb, var(--ui-accent) 14%, transparent)' } : undefined,
-    title,
-    onClick: e => onOpen(storedId, e),
+    style: focused ? ACCENT_WASH : undefined,
+    title: renaming ? undefined : title,
+    draggable: Boolean(drag) && !renaming,
+    onDragStart: drag?.onDragStart,
+    onDragOver: drag?.onDragOver,
+    onDragLeave: drag?.onDragLeave,
+    onDrop: drag?.onDrop,
+    onDragEnd: drag?.onDragEnd,
+    onClick: e => {
+      if (!renaming) onOpen(storedId, e)
+    },
     onKeyDown: e => {
+      if (renaming) return
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault()
         onOpen(storedId, e)
+      } else if (e.key === 'F2' && renameable) {
+        e.preventDefault()
+        startRename()
       }
     },
     children: [
       focused ? jsx('span', { 'aria-hidden': true, className: 'absolute left-0 w-0.5 rounded-full bg-(--ui-accent)', style: { top: 6, bottom: 6 } }) : null,
+      drag?.indicator
+        ? jsx('span', {
+            'aria-hidden': true,
+            className: 'pointer-events-none absolute inset-x-1.5 h-0.5 rounded-full bg-(--ui-accent)',
+            style: drag.indicator === 'after' ? { bottom: -1.5 } : { top: -1.5 }
+          })
+        : null,
       jsx(SessionStatusDot, { storedSessionId: storedId }),
       jsxs('span', {
         className: 'min-w-0 flex-1',
         children: [
-          jsx('span', { className: 'block truncate', children: title }),
+          renaming
+            ? jsx(InlineName, {
+                value: title,
+                label: 'Session name',
+                onDone: next => {
+                  setRenaming(false)
+                  if (next && next !== title) void ctl.rename(storedId, next)
+                }
+              })
+            : jsx('span', { className: 'block truncate', children: title }),
           details?.metadata
             ? jsx('span', { className: 'mt-0.5 block truncate text-[0.625rem] text-(--ui-text-tertiary)', children: details.metadata })
             : null,
@@ -838,7 +1470,14 @@ function Row({ storedId, title, session, focused, onOpen, onClose, dim }) {
             : null
         ]
       }),
-      onClose
+      drag && !renaming
+        ? jsx('span', {
+            'aria-hidden': true,
+            className: 'grid size-5 shrink-0 cursor-grab place-items-center text-(--ui-text-quaternary) opacity-0 transition-opacity group-hover:opacity-100',
+            children: jsx(Codicon, { name: 'gripper', className: 'text-[0.75rem]' })
+          })
+        : null,
+      onClose && !renaming
         ? jsx('button', {
             type: 'button',
             'aria-label': `Close ${title}`,
@@ -852,6 +1491,18 @@ function Row({ storedId, title, session, focused, onOpen, onClose, dim }) {
           })
         : null
     ]
+  })
+  return jsx(WithMenu, {
+    items,
+    label: `${title} actions`,
+    // Rename: keep focus off the row so the name field gets it.
+    onCloseAutoFocus: e => {
+      if (keepFocus.current) {
+        keepFocus.current = false
+        e.preventDefault()
+      }
+    },
+    children: row
   })
 }
 
@@ -867,14 +1518,14 @@ function NewSessionRow({ ctl }) {
   })
 }
 
-function Section({ label, count, children }) {
+function Section({ label, count, action, children }) {
   return jsxs('section', {
     className: 'flex flex-col gap-px pb-3',
     children: [
       jsxs('div', {
-        className: 'flex items-baseline gap-1.5 px-2.5 pb-1 pt-1 text-[0.6875rem] font-medium uppercase text-(--ui-text-quaternary)',
+        className: 'flex h-6 items-center gap-1.5 pl-2.5 pr-1 text-[0.6875rem] font-medium uppercase text-(--ui-text-quaternary)',
         style: { letterSpacing: '0.06em' },
-        children: [label, count ? jsx('span', { className: 'tabular-nums', children: count }) : null]
+        children: [label, count ? jsx('span', { className: 'tabular-nums', children: count }) : null, action ? jsx('span', { className: 'ml-auto flex', children: action }) : null]
       }),
       ...children
     ]
@@ -883,13 +1534,18 @@ function Section({ label, count, children }) {
 
 /** Mini diagram of a layout with four tiles, drawn from the real engine. */
 function LayoutGlyph({ layout, active, w = 34, h = 22 }) {
-  const rects = specRects(arrangement(layout, ['a', 'b', 'c', 'd'], { x: 0, y: 0, w, h }), { x: 0, y: 0, w, h })
+  const area = { x: 0, y: 0, w, h }
+  const spec =
+    layout === 'fullscreen'
+      ? fullscreenArrangement(['a', 'b', 'c', 'd'], 'a', area, { minTileW: w / 3, peek: h / 6 })
+      : arrangement(layout, ['a', 'b', 'c', 'd'], area)
+  const tiles = specRects(spec, area)
   const gap = 1.5
   return jsx('span', {
     'aria-hidden': true,
     className: 'relative inline-block shrink-0',
     style: { width: w, height: h },
-    children: [...rects.values()].map((r, i) =>
+    children: [...tiles.values()].map((r, i) =>
       jsx(
         'span',
         {
@@ -912,42 +1568,326 @@ function LayoutGlyph({ layout, active, w = 34, h = 22 }) {
   })
 }
 
-/** Four-way layout switch for the Tiles pane header. */
+/** Layout switch for the Tiles pane header: the enabled layouts only. */
 function LayoutSwitcher({ ctl }) {
   const s = useValue(ctl.$settings)
+  const fullscreen = useValue(ctl.$fullscreen)
+  const offered = enabledLayouts(s.layouts_enabled)
+  if (offered.length < 2) return null
   return jsx('div', {
     role: 'radiogroup',
     'aria-label': 'Tile layout',
-    className: 'mx-1 mb-3 grid grid-cols-4 gap-1 rounded-lg border border-(--ui-stroke-secondary) p-1',
-    children: LAYOUTS.map(id =>
-      jsxs(
+    className: 'mx-1 mb-3 grid gap-1 rounded-lg p-1',
+    style: { gridTemplateColumns: `repeat(${offered.length}, minmax(0, 1fr))`, background: 'color-mix(in srgb, var(--ui-text-secondary) 7%, transparent)' },
+    children: offered.map(id => {
+      const on = s.layout === id && !fullscreen
+      return jsxs(
         'button',
         {
           type: 'button',
           role: 'radio',
-          'aria-checked': s.layout === id,
+          'aria-checked': on,
           title: `${LAYOUT_INFO[id].label}: ${LAYOUT_INFO[id].blurb}`,
           className: cn(
             'flex flex-col items-center gap-1 rounded-md px-1 pb-1 pt-1.5 text-[0.6875rem] transition-colors',
-            s.layout === id ? 'text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
+            on ? 'text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
           ),
-          style: s.layout === id ? { background: 'color-mix(in srgb, var(--ui-accent) 14%, transparent)' } : undefined,
+          style: on ? ACCENT_WASH : undefined,
           onClick: () => ctl.setLayout(id),
-          children: [jsx(LayoutGlyph, { layout: id, active: s.layout === id, w: 28, h: 18 }), LAYOUT_INFO[id].label]
+          children: [jsx(LayoutGlyph, { layout: id, active: on, w: 28, h: 18 }), LAYOUT_INFO[id].label]
         },
         id
       )
+    })
+  })
+}
+
+// -- shortcuts card -----------------------------------------------------------
+
+function readKeybindOverrides() {
+  try {
+    const raw = globalThis.localStorage?.getItem(KEYBINDS_STORAGE)
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const actionDefaults = id => ACTIONS.find(a => a[0] === id)?.[2] ?? []
+const firstCombo = (overrides, id) => liveCombos(overrides, `${ID}.${id}`, actionDefaults(id))[0] ?? null
+
+function Keys({ keys }) {
+  return jsx('span', {
+    className: 'inline-flex shrink-0 items-center gap-0.5',
+    children: keys.map((k, i) =>
+      Kbd
+        ? jsx(Kbd, { size: 'sm', variant: 'ghost', children: k }, i)
+        : jsx(
+            'kbd',
+            {
+              className: 'inline-flex h-[1.125rem] min-w-[1.125rem] items-center justify-center rounded-[0.2rem] px-1 text-[0.625rem] text-(--ui-text-tertiary)',
+              style: { background: 'color-mix(in srgb, var(--ui-text-secondary) 12%, transparent)' },
+              children: k
+            },
+            i
+          )
     )
   })
 }
 
+/** First-run card: the four shortcuts worth learning, with the user's live keys. */
+function ShortcutsHint({ ctl }) {
+  const s = useValue(ctl.$settings)
+  if (s.hint_dismissed) return null
+  const overrides = readKeybindOverrides()
+  const arrows = arrowKeys(['focus-left', 'focus-right', 'focus-up', 'focus-down'].map(id => firstCombo(overrides, id)), IS_MAC)
+  const one = id => {
+    const c = firstCombo(overrides, id)
+    return c ? comboKeys(c, IS_MAC) : null
+  }
+  const rows = [
+    ['Move focus', arrows ?? one('focus-left')],
+    ['New tile', one('new-tile')],
+    ['Next layout', one('cycle-layout')],
+    ['Fullscreen', one('fullscreen')]
+  ].filter(r => r[1])
+  if (!rows.length) return null
+  return jsxs('div', {
+    className: 'relative mx-1 mb-3 rounded-lg py-2 pl-2.5 pr-2',
+    style: { background: 'color-mix(in srgb, var(--ui-text-secondary) 7%, transparent)' },
+    children: [
+      jsxs('div', {
+        className: 'mb-1.5 flex items-center justify-between',
+        children: [
+          jsx('span', { className: 'text-xs font-medium text-(--ui-text-secondary)', children: 'Shortcuts' }),
+          jsx('button', {
+            type: 'button',
+            'aria-label': 'Hide shortcuts',
+            title: 'Hide shortcuts',
+            className: 'grid size-5 place-items-center rounded text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
+            onClick: () => ctl.setSettings({ hint_dismissed: true }),
+            children: jsx(Codicon, { name: 'close', className: 'text-[0.75rem]' })
+          })
+        ]
+      }),
+      jsx('dl', {
+        className: 'grid items-center gap-x-3 gap-y-1',
+        style: { gridTemplateColumns: 'minmax(0, 1fr) auto' },
+        children: rows.flatMap(([label, keys]) => [
+          jsx('dt', { className: 'truncate text-xs text-(--ui-text-tertiary)', children: label }, `${label}:t`),
+          jsx('dd', { className: 'flex justify-end', children: jsx(Keys, { keys }) }, `${label}:d`)
+        ])
+      })
+    ]
+  })
+}
+
+// -- search -------------------------------------------------------------------
+
+function Search({ value, onChange }) {
+  const onKeyDown = e => {
+    if (e.key !== 'Escape') return
+    if (value) {
+      e.preventDefault()
+      e.stopPropagation()
+      onChange('')
+    } else {
+      e.currentTarget.blur()
+    }
+  }
+  if (SearchField) {
+    return jsx(SearchField, {
+      placeholder: 'Search sessions',
+      value,
+      onChange,
+      onKeyDown,
+      'aria-label': 'Search sessions',
+      containerClassName: 'mx-2 mb-2 flex'
+    })
+  }
+  return jsxs('label', {
+    className: 'mx-2 mb-2 flex h-7 items-center gap-1.5 text-xs',
+    children: [
+      jsx(Codicon, { name: 'search', className: 'text-[0.8125rem] text-(--ui-text-quaternary)' }),
+      jsx('input', {
+        type: 'text',
+        value,
+        placeholder: 'Search sessions',
+        'aria-label': 'Search sessions',
+        className: 'h-7 min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-(--ui-text-quaternary)',
+        onChange: e => onChange(e.target.value),
+        onKeyDown
+      })
+    ]
+  })
+}
+
+// -- workspaces ---------------------------------------------------------------
+
+function WorkspaceRow({ ctl, ws, editing, onEdit }) {
+  const keepFocus = useRef(false)
+  const items = [
+    ['folder-opened', 'Restore', () => void ctl.restoreWorkspace(ws.id)],
+    ['save', 'Replace with open tiles', () => ctl.overwriteWorkspace(ws.id)],
+    [
+      'edit',
+      'Rename',
+      () => {
+        keepFocus.current = true
+        onEdit(ws.id)
+      }
+    ],
+    'sep',
+    ['trash', 'Delete', () => ctl.deleteWorkspace(ws.id), true]
+  ]
+  const n = ws.sessions.length
+  const row = jsxs('div', {
+    className:
+      'group flex h-7 cursor-pointer items-center gap-2 rounded-md pl-2.5 pr-2 text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+    role: 'button',
+    tabIndex: 0,
+    title: editing ? undefined : `Restore ${ws.name}: ${n} ${n === 1 ? 'session' : 'sessions'}, ${LAYOUT_INFO[ws.layout].label}`,
+    onClick: () => {
+      if (!editing) void ctl.restoreWorkspace(ws.id)
+    },
+    onKeyDown: e => {
+      if (editing) return
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        void ctl.restoreWorkspace(ws.id)
+      } else if (e.key === 'F2') {
+        e.preventDefault()
+        onEdit(ws.id)
+      }
+    },
+    children: [
+      jsx(LayoutGlyph, { layout: ws.layout, active: false, w: 14, h: 10 }),
+      jsx('span', {
+        className: 'min-w-0 flex-1',
+        children: editing
+          ? jsx(InlineName, {
+              value: ws.name,
+              label: 'Workspace name',
+              onDone: next => {
+                onEdit(null)
+                if (next) ctl.updateWorkspace(ws.id, { name: next })
+              }
+            })
+          : jsx('span', { className: 'block truncate', children: ws.name })
+      }),
+      editing ? null : jsx('span', { className: 'shrink-0 text-[0.6875rem] tabular-nums text-(--ui-text-quaternary)', children: n })
+    ]
+  })
+  return jsx(WithMenu, {
+    items,
+    label: `${ws.name} actions`,
+    onCloseAutoFocus: e => {
+      if (keepFocus.current) {
+        keepFocus.current = false
+        e.preventDefault()
+      }
+    },
+    children: row
+  })
+}
+
+function SaveWorkspaceButton({ ctl, onSaved }) {
+  return jsx('button', {
+    type: 'button',
+    'aria-label': 'Save open tiles as a workspace',
+    title: 'Save open tiles as a workspace',
+    className: 'grid size-5 place-items-center rounded normal-case text-(--ui-text-quaternary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+    onClick: () => {
+      const ws = ctl.saveWorkspace()
+      if (ws) onSaved(ws.id)
+    },
+    children: jsx(Codicon, { name: 'save', className: 'text-[0.8125rem]' })
+  })
+}
+
+/** Restore picker for the keybind and palette: arrows + Enter, or 1–9. */
+function WorkspacePicker({ ctl }) {
+  const open = useValue(ctl.$picker)
+  const all = useValue(ctl.$workspaces)
+  const [at, setAt] = useState(0)
+  const items = useRef([])
+  useEffect(() => {
+    if (open) setAt(Math.max(0, all.length - 1))
+  }, [open])
+  useEffect(() => {
+    if (open) items.current[at]?.focus()
+  }, [open, at])
+  if (!hasDialog) return null
+  const pick = ws => {
+    ctl.$picker.set(false)
+    void ctl.restoreWorkspace(ws.id)
+  }
+  return jsx(Dialog, {
+    open,
+    onOpenChange: next => ctl.$picker.set(next),
+    children: jsxs(DialogContent, {
+      className: 'max-w-sm',
+      children: [
+        jsx(DialogHeader, { children: jsx(DialogTitle, { children: 'Restore workspace' }) }),
+        jsx('div', {
+          role: 'listbox',
+          'aria-label': 'Workspaces',
+          className: 'flex flex-col gap-px',
+          onKeyDown: e => {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault()
+              setAt(i => (i + (e.key === 'ArrowDown' ? 1 : -1) + all.length) % all.length)
+            } else if (/^[1-9]$/.test(e.key) && all[Number(e.key) - 1]) {
+              e.preventDefault()
+              pick(all[Number(e.key) - 1])
+            }
+          },
+          children: all.map((ws, i) =>
+            jsxs(
+              'button',
+              {
+                type: 'button',
+                role: 'option',
+                ref: el => {
+                  items.current[i] = el
+                },
+                'aria-selected': i === at,
+                className: cn(
+                  'flex h-8 items-center gap-2.5 rounded-md px-2.5 text-left text-sm outline-none transition-colors',
+                  i === at ? 'text-foreground' : 'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+                ),
+                style: i === at ? ACCENT_WASH : undefined,
+                onFocus: () => setAt(i),
+                onClick: () => pick(ws),
+                children: [
+                  jsx(LayoutGlyph, { layout: ws.layout, active: i === at, w: 18, h: 12 }),
+                  jsx('span', { className: 'min-w-0 flex-1 truncate', children: ws.name }),
+                  jsx('span', { className: 'text-xs tabular-nums text-(--ui-text-quaternary)', children: ws.sessions.length }),
+                  i < 9 ? jsx(Keys, { keys: [String(i + 1)] }) : null
+                ]
+              },
+              ws.id
+            )
+          )
+        })
+      ]
+    })
+  })
+}
+
+// -- the Tiles pane -----------------------------------------------------------
+
 function makePane(ctl) {
   const tiling = hasTiling()
 
-  // Two components so each calls a fixed set of hooks.
+  // Two hooks so each render calls a fixed set of hooks.
   function useOpen() {
     const l = useValue(host.state.sessionLayout)
-    return { open: openSessions(l.root, l.mainStoredSessionId), pinnedIds: useValue(host.state.pinnedSessionIds) }
+    const order = useValue(ctl.$order)
+    const open = openSessions(l.root, l.mainStoredSessionId)
+    // Tile order, so the list reads like the screen and a drop lands where it shows.
+    return { open: sortByOrder(open, order, o => groupIdOfPane(l.root, o.paneId)), pinnedIds: useValue(host.state.pinnedSessionIds) }
   }
 
   function useOpenStock() {
@@ -958,7 +1898,11 @@ function makePane(ctl) {
     const { data } = useSessionRows()
     const focused = useValue(host.state.focusedStoredSessionId)
     const settings = useValue(ctl.$settings)
+    const workspaces = useValue(ctl.$workspaces)
     const { open, pinnedIds } = tiling ? useOpen() : useOpenStock()
+    const [query, setQuery] = useState('')
+    const [editingWs, setEditingWs] = useState(null)
+    const [drag, setDrag] = useState(null) // { id, over, after }
     const rows = data?.sessions ?? []
     const byKey = new Map()
     for (const r of rows) for (const k of rowKeys(r)) if (!byKey.has(k)) byKey.set(k, r)
@@ -966,12 +1910,70 @@ function makePane(ctl) {
       const r = byKey.get(id)
       return (r && (r.title || r.preview)) || 'Untitled chat'
     }
+    const searching = query.trim().length > 0
+    const hit = (id, r = byKey.get(id)) => matchesQuery({ title: titleOf(id), preview: r?.preview }, query)
 
     const onOpen = (id, e) => void ctl.open(id, { replace: Boolean(e?.[`${settings.replace_modifier}Key`]) })
     const openIds = new Set(open.map(o => o.storedSessionId))
+    const pinSet = new Set(pinnedIds)
+    const isPinned = id => pinSet.has(id) || rowKeys(byKey.get(id) ?? { id }).some(k => pinSet.has(k))
     const pinned = pinnedIds.map(id => byKey.get(id)).filter(Boolean)
     const pinnedIdSet = new Set(pinned.map(rowId))
     const rest = rows.filter(r => !pinnedIdSet.has(rowId(r)) && !openIds.has(rowId(r)))
+
+    const shownPinned = pinned.filter(r => hit(rowId(r), r))
+    const shownOpen = open.filter(o => hit(o.storedSessionId))
+    const shownRest = rest.filter(r => hit(rowId(r), r))
+    const shownWs = workspaces.filter(w => matchesQuery({ title: w.name }, query))
+    const nothing = searching && !shownPinned.length && !shownOpen.length && !shownRest.length && !shownWs.length
+
+    const canDrag = canArrange() && !searching && open.length > 1
+    const dragFor = id =>
+      canDrag
+        ? {
+            dragging: drag?.id === id,
+            indicator: drag && drag.over === id && drag.id !== id ? (drag.after ? 'after' : 'before') : null,
+            onDragStart: e => {
+              e.dataTransfer.effectAllowed = 'move'
+              e.dataTransfer.setData('text/plain', id)
+              setDrag({ id, over: null, after: false })
+            },
+            onDragOver: e => {
+              if (!drag) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              const box = e.currentTarget.getBoundingClientRect()
+              const after = e.clientY > box.top + box.height / 2
+              if (drag.over !== id || drag.after !== after) setDrag({ ...drag, over: id, after })
+            },
+            onDragLeave: () => {
+              if (drag?.over === id) setDrag({ ...drag, over: null })
+            },
+            onDrop: e => {
+              e.preventDefault()
+              if (drag && drag.id !== id) ctl.moveTile(drag.id, id, drag.after)
+              setDrag(null)
+            },
+            onDragEnd: () => setDrag(null)
+          }
+        : null
+
+    const sessionRow = (prefix, id, r, extra = {}) =>
+      jsx(
+        Row,
+        {
+          ctl,
+          storedId: id,
+          title: titleOf(id),
+          session: r,
+          focused: focused === id,
+          pinned: isPinned(id),
+          tile: ctl.paneOf(id),
+          onOpen,
+          ...extra
+        },
+        `${prefix}:${id}`
+      )
 
     return jsxs('div', {
       className: 'flex h-full flex-col overflow-y-auto px-1.5 py-2',
@@ -980,43 +1982,46 @@ function makePane(ctl) {
         tiling
           ? null
           : jsx('p', {
-              className: 'mx-1 mb-3 rounded-md border border-(--ui-stroke-secondary) px-2.5 py-2 text-xs leading-relaxed text-(--ui-text-tertiary)',
+              className: 'mx-1 mb-3 rounded-md px-2.5 py-2 text-xs leading-relaxed text-(--ui-text-tertiary)',
+              style: { background: 'color-mix(in srgb, var(--ui-text-secondary) 7%, transparent)' },
               children: `Tiling needs ${NEEDS}. Until then, sessions open as tabs.`
             }),
-        pinned.length
+        tiling ? jsx(ShortcutsHint, { ctl }) : null,
+        jsx(Search, { value: query, onChange: setQuery }),
+        nothing
+          ? jsx('p', { className: 'px-2.5 pt-2 text-xs text-(--ui-text-quaternary)', children: `No sessions match ${query.trim()}` })
+          : null,
+        shownPinned.length
+          ? jsx(Section, { label: 'Pinned', children: shownPinned.map(r => sessionRow('p', rowId(r), r)) })
+          : null,
+        searching ? null : jsx(NewSessionRow, { ctl }),
+        !searching || shownOpen.length
           ? jsx(Section, {
-              label: 'Pinned',
-              children: pinned.map(r =>
-                jsx(Row, { storedId: rowId(r), title: titleOf(rowId(r)), session: r, focused: focused === rowId(r), onOpen }, `p:${rowId(r)}`)
+              label: tiling ? 'Open' : 'Opened here',
+              count: open.length || null,
+              action: canArrange() && open.length && !searching ? jsx(SaveWorkspaceButton, { ctl, onSaved: setEditingWs }) : null,
+              children: shownOpen.length
+                ? shownOpen.map(o =>
+                    sessionRow('o', o.storedSessionId, byKey.get(o.storedSessionId), {
+                      dim: !o.visible,
+                      onClose: ctl.close,
+                      drag: dragFor(o.storedSessionId)
+                    })
+                  )
+                : [jsx('p', { className: 'px-2.5 text-xs text-(--ui-text-quaternary)', children: 'Click a session to open it in a new tile.' }, 'empty')]
+            })
+          : null,
+        canArrange() && shownWs.length
+          ? jsx(Section, {
+              label: 'Workspaces',
+              children: shownWs.map(ws =>
+                jsx(WorkspaceRow, { ctl, ws, editing: editingWs === ws.id, onEdit: setEditingWs }, ws.id)
               )
             })
           : null,
-        jsx(NewSessionRow, { ctl }),
-        jsx(Section, {
-          label: tiling ? 'Open' : 'Opened here',
-          count: open.length || null,
-          children: open.length
-            ? open.map(o =>
-                jsx(
-                  Row,
-                  {
-                    storedId: o.storedSessionId,
-                    title: titleOf(o.storedSessionId),
-                    session: byKey.get(o.storedSessionId),
-                    focused: focused === o.storedSessionId,
-                    dim: !o.visible,
-                    onOpen,
-                    onClose: ctl.close
-                  },
-                  `o:${o.storedSessionId}`
-                )
-              )
-            : [jsx('p', { className: 'px-2.5 text-xs text-(--ui-text-quaternary)', children: 'Click a session to open it in a new tile.' }, 'empty')]
-        }),
-        jsx(Section, {
-          label: 'Sessions',
-          children: rest.map(r => jsx(Row, { storedId: rowId(r), title: titleOf(rowId(r)), session: r, focused: false, onOpen }, `s:${rowId(r)}`))
-        })
+        shownRest.length || !searching
+          ? jsx(Section, { label: 'Sessions', children: shownRest.map(r => sessionRow('s', rowId(r), r)) })
+          : null
       ]
     })
   }
@@ -1035,8 +2040,15 @@ const ACTIONS = [
   ['new-tile', 'New chat in a new tile', ['ctrl+alt+enter'], c => c.newTile()],
   ['close', 'Close focused tile', ['ctrl+alt+w'], c => c.close(host.state.focusedStoredSessionId.get())],
   ['cycle-layout', 'Next layout', ['ctrl+alt+space'], c => c.cycleLayout()],
+  ['fullscreen', 'Toggle fullscreen tile', ['ctrl+alt+f'], c => c.toggleFullscreen()],
   ['promote', 'Make focused tile the master', ['ctrl+alt+m'], c => c.promoteFocused()],
   ['equalize', 'Re-tile and reset sizes', ['ctrl+alt+r'], c => c.equalizeAll()],
+  ['save-workspace', 'Save open tiles as a workspace', ['ctrl+alt+s'], c => {
+    const ws = c.saveWorkspace()
+    if (ws) host.notify({ kind: 'success', message: `Saved ${ws.name}. Rename it in the Tiles pane.` })
+  }],
+  ['restore-workspace', 'Restore workspace…', ['ctrl+alt+o'], c => c.openPicker()],
+  ['show-shortcuts', 'Show shortcuts', [], c => c.showShortcuts()],
   ['layout-grid', 'Layout: Grid', [], c => c.setLayout('grid', { announce: true })],
   ['layout-master', 'Layout: Master', [], c => c.setLayout('master', { announce: true })],
   ['layout-dwindle', 'Layout: Dwindle', [], c => c.setLayout('dwindle', { announce: true })],
@@ -1052,33 +2064,92 @@ function SettingsHeading({ children }) {
   })
 }
 
-function LayoutCards({ ctl, value }) {
+function OfferSwitch({ checked, disabled, label, onChange }) {
+  if (Switch) return jsx(Switch, { checked, disabled, 'aria-label': label, onCheckedChange: onChange })
+  return jsx('input', { type: 'checkbox', checked, disabled, 'aria-label': label, onChange: e => onChange(e.target.checked) })
+}
+
+/** One card per layout: click to use it, switch to offer it in the pane,
+ *  status chip and Next layout. The last offered layout can't be switched off. */
+function LayoutCards({ ctl, s }) {
+  const offered = enabledLayouts(s.layouts_enabled)
   return jsx('div', {
     role: 'radiogroup',
     'aria-label': 'Layout',
     className: 'grid grid-cols-2 gap-2 px-1 pb-1 sm:grid-cols-4',
-    children: LAYOUTS.map(id =>
-      jsxs(
-        'button',
+    children: LAYOUTS.map(id => {
+      const on = offered.includes(id)
+      const current = s.layout === id
+      return jsxs(
+        'div',
         {
-          type: 'button',
-          role: 'radio',
-          'aria-checked': value === id,
           className: cn(
-            'flex flex-col items-start gap-2 rounded-lg border p-3 text-left transition-colors',
-            value === id ? 'border-(--ui-accent)' : 'border-(--ui-stroke-secondary) hover:bg-(--chrome-action-hover)'
+            'relative flex flex-col rounded-lg border transition-colors',
+            current ? 'border-(--ui-accent)' : 'border-(--ui-stroke-secondary)',
+            !on && 'opacity-55'
           ),
-          style: value === id ? { background: 'color-mix(in srgb, var(--ui-accent) 10%, transparent)' } : undefined,
-          onClick: () => ctl.setLayout(id),
+          style: current ? { background: 'color-mix(in srgb, var(--ui-accent) 10%, transparent)' } : undefined,
           children: [
-            jsx(LayoutGlyph, { layout: id, active: value === id, w: 64, h: 40 }),
-            jsx('span', { className: 'text-sm font-medium text-foreground', children: LAYOUT_INFO[id].label }),
-            jsx('span', { className: 'text-xs leading-snug text-(--ui-text-tertiary)', children: LAYOUT_INFO[id].blurb })
+            jsxs('button', {
+              type: 'button',
+              role: 'radio',
+              'aria-checked': current,
+              disabled: !on,
+              className: cn('flex flex-1 flex-col items-start gap-2 rounded-lg p-3 text-left', on && !current && 'hover:bg-(--chrome-action-hover)'),
+              onClick: () => ctl.setLayout(id),
+              children: [
+                jsx(LayoutGlyph, { layout: id, active: current, w: 64, h: 40 }),
+                jsx('span', { className: 'text-sm font-medium text-foreground', children: LAYOUT_INFO[id].label }),
+                jsx('span', { className: 'text-xs leading-snug text-(--ui-text-tertiary)', children: LAYOUT_INFO[id].blurb })
+              ]
+            }),
+            jsx('span', {
+              className: 'absolute right-2.5 top-2.5 flex',
+              title: on && offered.length === 1 ? 'At least one layout stays on' : on ? `Stop offering ${LAYOUT_INFO[id].label}` : `Offer ${LAYOUT_INFO[id].label}`,
+              children: jsx(OfferSwitch, {
+                checked: on,
+                disabled: on && offered.length === 1,
+                label: `Offer ${LAYOUT_INFO[id].label}`,
+                onChange: next => ctl.setLayoutOffered(id, next)
+              })
+            })
           ]
         },
         id
       )
-    )
+    })
+  })
+}
+
+function MasterSize({ ctl, s }) {
+  const custom = !MASTER_PRESETS.includes(s.master_ratio)
+  const options = MASTER_PRESETS.map(n => ({ id: String(n), label: `${Math.round(n * 100)}%` }))
+  if (custom) options.push({ id: String(s.master_ratio), label: `${Math.round(s.master_ratio * 100)}%` })
+  return jsx(ListRow, {
+    title: 'Master size',
+    description: custom ? 'Set by dragging the divider. Pick a preset to go back.' : 'Width of the master tile. Drag the divider to set your own.',
+    action: jsx(SegmentedControl, {
+      options,
+      value: String(s.master_ratio),
+      onChange: v => {
+        if (Number(v) !== s.master_ratio) ctl.setMasterPreset(Number(v))
+      }
+    })
+  })
+}
+
+function Workspaces({ ctl }) {
+  const all = useValue(ctl.$workspaces)
+  const [editing, setEditing] = useState(null)
+  if (!all.length) {
+    return jsx('p', {
+      className: 'px-2.5 py-1 text-sm text-(--ui-text-tertiary)',
+      children: 'None yet. Save your open tiles from the Open list in the Tiles pane.'
+    })
+  }
+  return jsx('div', {
+    className: 'flex flex-col gap-px px-1',
+    children: all.map(ws => jsx(WorkspaceRow, { ctl, ws, editing: editing === ws.id, onEdit: setEditing }, ws.id))
   })
 }
 
@@ -1092,7 +2163,7 @@ function Shortcuts({ ctx }) {
   return jsxs('div', {
     className: 'flex items-center justify-between gap-3 px-2.5 py-1 text-sm text-(--ui-text-tertiary)',
     children: [
-      'Every Tiled Sessions shortcut is rebindable in Keybinds (search “Tiles”).',
+      'Every Tiled Sessions shortcut is rebindable in Keybinds. Search for Tiles.',
       jsx('button', {
         type: 'button',
         className: 'shrink-0 rounded-md border border-(--ui-stroke-secondary) px-2.5 py-1 text-foreground hover:bg-(--chrome-action-hover)',
@@ -1114,21 +2185,8 @@ function makeSettings(ctl, ctx) {
           ? null
           : jsx('p', { className: 'pb-3 text-sm text-(--ui-text-tertiary)', children: `Tiling needs ${NEEDS}. These settings apply once it is available.` }),
         jsx(SettingsHeading, { children: 'Layout' }),
-        jsx(LayoutCards, { ctl, value: s.layout }),
-        s.layout === 'master'
-          ? jsx(ListRow, {
-              title: 'Master size',
-              description: 'Width of the master tile.',
-              action: jsx(SegmentedControl, {
-                options: ['0.5', '0.55', '0.6', '0.66'].map(n => ({ id: n, label: `${Math.round(Number(n) * 100)}%` })),
-                value: String(s.master_ratio),
-                onChange: v => {
-                  ctl.setSettings({ master_ratio: Number(v) })
-                  ctl.setLayout('master')
-                }
-              })
-            })
-          : null,
+        jsx(LayoutCards, { ctl, s }),
+        s.layout === 'master' ? jsx(MasterSize, { ctl, s }) : null,
         jsx(ToggleRow, {
           label: 'Auto-tile',
           description: arrange
@@ -1137,7 +2195,7 @@ function makeSettings(ctl, ctx) {
           checked: s.auto_tile && arrange,
           onChange: on => {
             ctl.setSettings({ auto_tile: on })
-            if (on) ctl.equalizeAll()
+            if (on) ctl.retileAll()
           }
         }),
         !s.auto_tile || !arrange
@@ -1182,7 +2240,15 @@ function makeSettings(ctl, ctx) {
             onChange: v => ctl.setSettings({ max_tiles: Number(v) })
           })
         }),
+        arrange ? jsx(SettingsHeading, { children: 'Workspaces' }) : null,
+        arrange ? jsx(Workspaces, { ctl }) : null,
         jsx(SettingsHeading, { children: 'Shortcuts' }),
+        jsx(ToggleRow, {
+          label: 'Shortcuts card',
+          description: 'Show the key shortcuts at the top of the Tiles pane.',
+          checked: !s.hint_dismissed,
+          onChange: on => ctl.setSettings({ hint_dismissed: !on })
+        }),
         jsx(Shortcuts, { ctx })
       ]
     })
@@ -1192,16 +2258,27 @@ function makeSettings(ctl, ctx) {
 function makeStatusChip(ctl) {
   return function TiledSessionsChip() {
     const s = useValue(ctl.$settings)
+    const fullscreen = useValue(ctl.$fullscreen)
     const l = useValue(host.state.sessionLayout)
     const n = chatZones(l?.root ?? null).length
-    if (n < 2) return null
-    return jsxs('button', {
-      type: 'button',
-      title: 'Tile layout: click for the next one',
-      className: 'flex h-full items-center gap-1.5 px-1.5 text-(--ui-text-tertiary) hover:text-foreground',
-      onClick: () => ctl.cycleLayout(),
-      children: [jsx(LayoutGlyph, { layout: s.layout, active: false, w: 16, h: 11 }), `${LAYOUT_INFO[s.layout].label} · ${n}`]
-    })
+    // The picker rides along here: the status bar is always mounted.
+    const picker = jsx(WorkspacePicker, { ctl }, 'picker')
+    if (n < 2) return picker
+    const chip = jsxs(
+      'button',
+      {
+        type: 'button',
+        title: fullscreen ? 'Fullscreen tile: click to bring the layout back' : 'Tile layout: click for the next one',
+        className: cn('flex h-full items-center gap-1.5 px-1.5 hover:text-foreground', fullscreen ? 'text-(--ui-text-secondary)' : 'text-(--ui-text-tertiary)'),
+        onClick: () => (fullscreen ? ctl.toggleFullscreen() : ctl.cycleLayout()),
+        children: [
+          jsx(LayoutGlyph, { layout: fullscreen ? 'fullscreen' : s.layout, active: false, w: 16, h: 11 }),
+          `${fullscreen ? 'Fullscreen' : LAYOUT_INFO[s.layout].label} · ${n}`
+        ]
+      },
+      'chip'
+    )
+    return [chip, picker]
   }
 }
 
@@ -1237,6 +2314,23 @@ export default {
       const data = { id: `${ID}.${id}`, label: `Tiles: ${label}`, category: 'view', defaults, run: () => run(ctl) }
       ctx.register({ id: `key:${id}`, area: KEYBINDS_AREA, data })
       ctx.register({ id: `cmd:${id}`, area: PALETTE_AREA, data: { ...data, action: data.id } })
+    }
+
+    // One palette entry per saved workspace ("Tiles: Restore Review").
+    if (canArrange()) {
+      let disposeWs = []
+      const syncWorkspaceCommands = all => {
+        for (const d of disposeWs) if (typeof d === 'function') d()
+        disposeWs = all.map(ws =>
+          ctx.register({
+            id: `cmd:ws:${ws.id}`,
+            area: PALETTE_AREA,
+            data: { id: `${ID}.ws.${ws.id}`, label: `Tiles: Restore ${ws.name}`, keywords: ['workspace'], run: () => void ctl.restoreWorkspace(ws.id) }
+          })
+        )
+      }
+      syncWorkspaceCommands(ctl.$workspaces.get())
+      ctx.onDispose(ctl.$workspaces.listen(syncWorkspaceCommands))
     }
   }
 }

@@ -2,15 +2,17 @@
 # desktop/plugin.js (generated from src/ by scripts/build.mjs).
 name: tiled-sessions
 title: Tiled Sessions
-version: "0.2.2"
+version: "0.3.0"
 license: MIT
 description: >-
   Hyprland for Hermes Desktop. Clicking a session opens it in a new tile and
   every tile is re-laid out in your chosen layout: Grid (all tiles the same
   size), Master, Dwindle or Columns. Ctrl+Alt+arrows move focus (the caret
-  follows), Ctrl+Alt+Enter opens a new chat in its own tile, and every
-  shortcut is editable on the plugin's settings page. A Tiles pane lists
-  Pinned, Open and Sessions. SDK-only; public gateway RPCs only; no telemetry.
+  follows), Ctrl+Alt+Enter opens a new chat in its own tile, Ctrl+Alt+F
+  fullscreens the focused tile, and saved workspaces bring a set of tiles
+  back in one action. Every shortcut is editable on the plugin's settings
+  page. A searchable Tiles pane lists Pinned, Open, Workspaces and Sessions.
+  SDK-only; public gateway RPCs only; no telemetry.
 maintainer: strnadchristopher
 homepage: https://github.com/strnadchristopher/tiled-sessions
 docs_url: https://github.com/strnadchristopher/tiled-sessions#readme

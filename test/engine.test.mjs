@@ -29,7 +29,23 @@ import {
   mergeSessionRows,
   swap,
   toggleSplit,
-  touch
+  touch,
+  enabledLayouts,
+  setLayoutEnabled,
+  keepEnabled,
+  moveNextTo,
+  sortByOrder,
+  fullscreenArrangement,
+  masterRatioFromCore,
+  clampRatio,
+  matchesQuery,
+  makeWorkspace,
+  readWorkspaces,
+  uniqueName,
+  planRestore,
+  liveCombos,
+  comboKeys,
+  arrowKeys
 } from '../src/engine.mjs'
 
 const AREA = { x: 0, y: 0, w: 1600, h: 900 }
@@ -406,5 +422,186 @@ describe('groupIdOfPane', () => {
     ] }
     assert.equal(groupIdOfPane(root, 'session-tile:b'), 'g2')
     assert.equal(groupIdOfPane(root, 'nope'), null)
+  })
+})
+
+describe('enabled layouts', () => {
+  it('sanitises to LAYOUTS order and never empties', () => {
+    assert.deepEqual(enabledLayouts(['columns', 'grid', 'bogus']), ['grid', 'columns'])
+    assert.deepEqual(enabledLayouts([]), ['grid', 'master', 'dwindle', 'columns'])
+    assert.deepEqual(enabledLayouts(undefined), ['grid', 'master', 'dwindle', 'columns'])
+  })
+
+  it('cycles only through enabled layouts', () => {
+    const on = ['grid', 'dwindle']
+    assert.equal(nextLayout('grid', on), 'dwindle')
+    assert.equal(nextLayout('dwindle', on), 'grid')
+    // From a disabled layout: the next enabled one after it.
+    assert.equal(nextLayout('master', on), 'dwindle')
+    assert.equal(nextLayout('columns', on), 'grid')
+    assert.equal(nextLayout('grid', ['grid']), 'grid')
+  })
+
+  it('keeps the last enabled layout on', () => {
+    assert.deepEqual(setLayoutEnabled(['grid', 'master'], 'grid', false), ['master'])
+    assert.deepEqual(setLayoutEnabled(['master'], 'master', false), ['master'])
+    assert.deepEqual(setLayoutEnabled(['master'], 'columns', true), ['master', 'columns'])
+    assert.deepEqual(setLayoutEnabled(['master'], 'nope', true), ['master'])
+  })
+
+  it('moves off a layout that was just disabled', () => {
+    assert.equal(keepEnabled('master', ['grid', 'master']), 'master')
+    assert.equal(keepEnabled('master', ['grid', 'columns']), 'columns')
+  })
+})
+
+describe('reorder', () => {
+  it('moveNextTo places before or after the target', () => {
+    assert.deepEqual(moveNextTo(['a', 'b', 'c', 'd'], 'a', 'c'), ['b', 'a', 'c', 'd'])
+    assert.deepEqual(moveNextTo(['a', 'b', 'c', 'd'], 'a', 'c', true), ['b', 'c', 'a', 'd'])
+    assert.deepEqual(moveNextTo(['a', 'b', 'c', 'd'], 'd', 'a'), ['d', 'a', 'b', 'c'])
+    assert.deepEqual(moveNextTo(['a', 'b'], 'a', 'a'), ['a', 'b'])
+    assert.deepEqual(moveNextTo(['a', 'b'], 'x', 'a'), ['a', 'b'])
+  })
+
+  it('sortByOrder is stable and parks unknowns last', () => {
+    const items = [{ g: 'x' }, { g: 'c' }, { g: 'a' }, { g: 'y' }, { g: 'b' }]
+    assert.deepEqual(sortByOrder(items, ['a', 'b', 'c'], i => i.g).map(i => i.g), ['a', 'b', 'c', 'x', 'y'])
+  })
+})
+
+describe('fullscreen', () => {
+  const panes = ['workspace', 'session-tile:b', 'session-tile:c']
+
+  it('gives the focused tile the area above a thin strip', () => {
+    const spec = fullscreenArrangement(panes, 'session-tile:b', AREA)
+    assert.equal(spec.orientation, 'column')
+    assert.deepEqual(spec.children[0], { pane: 'session-tile:b' })
+    assert.deepEqual(spec.children[1], { orientation: 'row', children: [{ pane: 'workspace' }, { pane: 'session-tile:c' }] })
+    assert.deepEqual(spec.weights, [AREA.h - 36, 36])
+    assert.ok(specRects(spec, AREA).get('session-tile:b').h > 0.95 * AREA.h)
+  })
+
+  it('wraps the strip when tiles would be narrower than minTileW', () => {
+    const many = ['a', 'b', 'c', 'd', 'e', 'f'].map(x => `session-tile:${x}`)
+    const spec = fullscreenArrangement(many, 'session-tile:a', { x: 0, y: 0, w: 800, h: 900 })
+    // 5 others, 2 per row at 320px → 3 strip rows
+    assert.equal(spec.children[1].orientation, 'column')
+    assert.equal(spec.children[1].children.length, 3)
+    assert.deepEqual(spec.weights, [900 - 108, 108])
+    assert.deepEqual([...specRects(spec, AREA).keys()].sort(), [...many].sort())
+  })
+
+  it('is a single leaf alone and null for an unknown pane', () => {
+    assert.deepEqual(fullscreenArrangement(['workspace'], 'workspace', AREA), { pane: 'workspace' })
+    assert.equal(fullscreenArrangement(panes, 'session-tile:zz', AREA), null)
+  })
+})
+
+describe('master ratio from core weights', () => {
+  const g = (id, pane) => ({ type: 'group', id, panes: [pane], active: pane, minimized: false })
+
+  it('reads master over the chat children of its split', () => {
+    const root = {
+      type: 'split',
+      id: 's0',
+      orientation: 'row',
+      weights: [0.2, 0.48, 0.32],
+      children: [
+        g('side', 'sessions'),
+        g('m', 'workspace'),
+        { type: 'split', id: 's1', orientation: 'column', weights: [1, 1], children: [g('b', 'session-tile:b'), g('c', 'session-tile:c')] }
+      ]
+    }
+    assert.equal(clampRatio(masterRatioFromCore(root, 'm')), 0.6)
+    assert.equal(clampRatio(0.6000001), 0.6)
+    assert.equal(clampRatio(0.97), 0.85)
+  })
+
+  it('is null for a lone tile or a missing master', () => {
+    assert.equal(masterRatioFromCore(g('m', 'workspace'), 'm'), null)
+    const root = { type: 'split', id: 's', orientation: 'row', weights: [1, 1], children: [g('side', 'sessions'), g('m', 'workspace')] }
+    assert.equal(masterRatioFromCore(root, 'm'), null)
+    assert.equal(masterRatioFromCore(root, 'zz'), null)
+  })
+})
+
+describe('search', () => {
+  it('matches every term against title and preview', () => {
+    const row = { title: 'Fix login bug', preview: 'The OAuth redirect loops' }
+    assert.ok(matchesQuery(row, ''))
+    assert.ok(matchesQuery(row, '  '))
+    assert.ok(matchesQuery(row, 'login'))
+    assert.ok(matchesQuery(row, 'LOGIN oauth'))
+    assert.ok(!matchesQuery(row, 'login kanban'))
+    assert.ok(matchesQuery({ title: null, preview: 'only preview' }, 'preview'))
+    assert.ok(!matchesQuery({}, 'x'))
+  })
+})
+
+describe('workspaces', () => {
+  it('makes and reads workspaces defensively', () => {
+    const ws = makeWorkspace('  Review ', 'master', ['a', 'b', 'a', null], 1000)
+    assert.deepEqual(ws, { id: 'ws-rs', name: 'Review', layout: 'master', sessions: ['a', 'b'] })
+    assert.equal(makeWorkspace('', 'nope', [], 1).layout, 'grid')
+    assert.deepEqual(readWorkspaces([ws, null, { id: 1 }, { id: 'x', name: 'X', sessions: ['a', 2], layout: 'bad' }]), [
+      ws,
+      { id: 'x', name: 'X', layout: 'grid', sessions: ['a'] }
+    ])
+    assert.deepEqual(readWorkspaces('junk'), [])
+  })
+
+  it('uniqueName counts up past clashes', () => {
+    assert.equal(uniqueName('Workspace', []), 'Workspace')
+    assert.equal(uniqueName('Workspace', ['workspace', 'Workspace 2']), 'Workspace 3')
+  })
+
+  const opened = (...pairs) => pairs.map(([paneId, storedSessionId]) => ({ paneId, storedSessionId, visible: true }))
+
+  it('reuses main, closes extras, opens the rest in order', () => {
+    const plan = planRestore({
+      sessions: ['a', 'b', 'c'],
+      open: opened(['workspace', 'x'], ['session-tile:b', 'b'], ['session-tile:y', 'y']),
+      mainStoredSessionId: 'x'
+    })
+    assert.deepEqual(plan, { wanted: ['a', 'b', 'c'], close: ['session-tile:y'], inPlace: 'a', openTiles: ['c'] })
+  })
+
+  it('keeps main when it is part of the workspace', () => {
+    const plan = planRestore({ sessions: ['a', 'b'], open: opened(['workspace', 'b']), mainStoredSessionId: 'b' })
+    assert.deepEqual(plan, { wanted: ['a', 'b'], close: [], inPlace: null, openTiles: ['a'] })
+  })
+
+  it('closes main when every wanted session is already a tile', () => {
+    const plan = planRestore({ sessions: ['a'], open: opened(['workspace', 'x'], ['session-tile:a', 'a']), mainStoredSessionId: 'x' })
+    assert.deepEqual(plan, { wanted: ['a'], close: ['workspace'], inPlace: null, openTiles: [] })
+  })
+
+  it('fills a blank main first, skips deleted sessions and caps at maxTiles', () => {
+    const plan = planRestore({ sessions: ['a', 'gone', 'b', 'c'], open: [], exists: id => id !== 'gone', maxTiles: 2 })
+    assert.deepEqual(plan, { wanted: ['a', 'b'], close: [], inPlace: 'a', openTiles: ['b'] })
+  })
+
+  it('does nothing harmful when every session is gone', () => {
+    const plan = planRestore({ sessions: ['gone'], open: opened(['workspace', 'x']), mainStoredSessionId: 'x', exists: () => false })
+    assert.deepEqual(plan, { wanted: [], close: [], inPlace: null, openTiles: [] })
+  })
+})
+
+describe('keybind display', () => {
+  it('prefers the stored override, including an unbinding', () => {
+    assert.deepEqual(liveCombos({ 'x.a': ['ctrl+k'] }, 'x.a', ['ctrl+j']), ['ctrl+k'])
+    assert.deepEqual(liveCombos({ 'x.a': [] }, 'x.a', ['ctrl+j']), [])
+    assert.deepEqual(liveCombos({}, 'x.a', ['ctrl+j']), ['ctrl+j'])
+    assert.deepEqual(liveCombos(null, 'x.a', ['ctrl+j']), ['ctrl+j'])
+  })
+
+  it('labels keys per platform and collapses arrow sets', () => {
+    assert.deepEqual(comboKeys('ctrl+alt+left'), ['Ctrl', 'Alt', '←'])
+    assert.deepEqual(comboKeys('ctrl+alt+f', true), ['⌃', '⌥', 'F'])
+    assert.deepEqual(comboKeys('mod+enter'), ['Ctrl', '↵'])
+    assert.deepEqual(arrowKeys(['ctrl+alt+left', 'ctrl+alt+right', 'ctrl+alt+up', 'ctrl+alt+down']), ['Ctrl', 'Alt', '←→↑↓'])
+    assert.equal(arrowKeys(['ctrl+alt+left', 'ctrl+right', 'ctrl+alt+up', 'ctrl+alt+down']), null)
+    assert.equal(arrowKeys(['ctrl+alt+left', null, 'ctrl+alt+up', 'ctrl+alt+down']), null)
   })
 })

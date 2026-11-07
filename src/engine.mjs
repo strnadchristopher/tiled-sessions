@@ -375,8 +375,36 @@ export function arrangement(layout, panes, area, { masterRatio = 0.55 } = {}) {
   return column(lines.filter(l => l))
 }
 
-/** Next layout in LAYOUTS after `current`. */
-export const nextLayout = current => LAYOUTS[(LAYOUTS.indexOf(current) + 1) % LAYOUTS.length]
+/** The user's enabled layouts in LAYOUTS order; never empty (all on when
+ *  nothing valid is stored). */
+export function enabledLayouts(list) {
+  const on = Array.isArray(list) ? LAYOUTS.filter(id => list.includes(id)) : []
+  return on.length ? on : [...LAYOUTS]
+}
+
+/** Next enabled layout after `current` in LAYOUTS order. `current` itself
+ *  need not be enabled (it was just switched off, or picked from the palette). */
+export function nextLayout(current, enabled = LAYOUTS) {
+  const on = enabledLayouts(enabled)
+  const at = LAYOUTS.indexOf(current)
+  for (let i = 1; i <= LAYOUTS.length; i++) {
+    const id = LAYOUTS[(at + i + LAYOUTS.length) % LAYOUTS.length]
+    if (on.includes(id)) return id
+  }
+  return on[0]
+}
+
+/** Switch one layout on or off. The last enabled layout stays on. */
+export function setLayoutEnabled(enabled, id, on) {
+  const now = enabledLayouts(enabled)
+  if (!LAYOUTS.includes(id)) return now
+  if (on) return enabledLayouts([...now, id])
+  return now.length > 1 ? now.filter(l => l !== id) : now
+}
+
+/** The layout to show once `enabled` changes: `current` when still enabled,
+ *  else the next enabled one. */
+export const keepEnabled = (current, enabled) => (enabledLayouts(enabled).includes(current) ? current : nextLayout(current, enabled))
 
 /** Move `id` to the front (master). */
 export const promote = (order, id) => (order.includes(id) ? [id, ...order.filter(o => o !== id)] : order)
@@ -390,6 +418,169 @@ export function swapOrder(order, p, q) {
   next[i] = q
   next[j] = p
   return next
+}
+
+/** Move `id` next to `target` in `order`: before it, or after it with `after`. */
+export function moveNextTo(order, id, target, after = false) {
+  if (id === target || !order.includes(id) || !order.includes(target)) return order
+  const rest = order.filter(o => o !== id)
+  const at = rest.indexOf(target) + (after ? 1 : 0)
+  return [...rest.slice(0, at), id, ...rest.slice(at)]
+}
+
+/** `items` sorted by where `keyOf(item)` sits in `order`; unknown keys keep
+ *  their relative order at the end. Stable. */
+export function sortByOrder(items, order, keyOf) {
+  const rank = item => {
+    const at = order.indexOf(keyOf(item))
+    return at === -1 ? Number.MAX_SAFE_INTEGER : at
+  }
+  return items.map((item, i) => [item, i]).sort((p, q) => rank(p[0]) - rank(q[0]) || p[1] - q[1]).map(([item]) => item)
+}
+
+/**
+ * Fullscreen: `focused` fills the chat area and every other tile folds into a
+ * thin strip along the bottom (`peek` px per strip row, as many tiles per row
+ * as fit at `minTileW`). Core can't minimize a zone for a plugin, and a tile
+ * may not leave the arrangement, so the strip keeps them all on screen.
+ */
+export function fullscreenArrangement(panes, focused, area, { minTileW = 320, peek = 36 } = {}) {
+  if (!panes.includes(focused)) return null
+  const others = panes.filter(p => p !== focused).map(leafOf)
+  if (!others.length) return leafOf(focused)
+  const cols = Math.max(1, Math.min(others.length, Math.floor(area.w / minTileW)))
+  const lines = []
+  for (let i = 0; i < others.length; i += cols) lines.push(row(others.slice(i, i + cols)))
+  const strip = Math.min(area.h * 0.4, peek * lines.length)
+  return { orientation: 'column', weights: [area.h - strip, strip], children: [leafOf(focused), column(lines)] }
+}
+
+/**
+ * Master share of the chat area as the user left it (sash drag), read from
+ * core's weights: the split that directly holds the master zone, master's
+ * weight over every chat-holding child of that split. Null when the tree
+ * isn't master-shaped (one tile, or master stacked inside another zone).
+ */
+export function masterRatioFromCore(coreRoot, masterGroupId, isChat = isSessionPane) {
+  const find = n => {
+    if (!n || n.type === 'group') return null
+    if (n.children.some(c => c.type === 'group' && c.id === masterGroupId)) return n
+    for (const c of n.children) {
+      const hit = find(c)
+      if (hit) return hit
+    }
+    return null
+  }
+  const parent = find(coreRoot)
+  if (!parent) return null
+  let master = 0
+  let chat = 0
+  parent.children.forEach((c, i) => {
+    if (!holdsChat(c, isChat)) return
+    chat += parent.weights[i] ?? 0
+    if (c.type === 'group' && c.id === masterGroupId) master = parent.weights[i] ?? 0
+  })
+  if (!(chat > 0) || master === chat) return null
+  return master / chat
+}
+
+/** Ratio kept within the range the master layout honours, to 2 decimals. */
+export const clampRatio = r => Math.round(Math.min(0.85, Math.max(0.15, r)) * 100) / 100
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/** Every whitespace-separated term of `query` appears (case-insensitive) in
+ *  the row's title or preview. An empty query matches everything. */
+export function matchesQuery(row, query) {
+  const terms = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return true
+  const hay = `${row?.title ?? ''} ${row?.preview ?? ''}`.toLowerCase()
+  return terms.every(t => hay.includes(t))
+}
+
+// ---------------------------------------------------------------------------
+// Saved workspaces
+// ---------------------------------------------------------------------------
+
+/** A workspace: name, layout and the stored session ids in tile order. */
+export function makeWorkspace(name, layout, sessionIds, now = Date.now()) {
+  const sessions = [...new Set(sessionIds.filter(Boolean))]
+  return { id: `ws-${now.toString(36)}`, name: String(name).trim() || 'Workspace', layout: LAYOUTS.includes(layout) ? layout : LAYOUTS[0], sessions }
+}
+
+/** Parse stored workspaces, dropping anything malformed. */
+export function readWorkspaces(raw) {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(w => w && typeof w.id === 'string' && typeof w.name === 'string' && Array.isArray(w.sessions))
+    .map(w => ({ id: w.id, name: w.name, layout: LAYOUTS.includes(w.layout) ? w.layout : LAYOUTS[0], sessions: w.sessions.filter(s => typeof s === 'string') }))
+}
+
+/** `base`, or `base 2`, `base 3`… so it doesn't clash with `names`. */
+export function uniqueName(base, names) {
+  const taken = new Set(names.map(n => n.toLowerCase()))
+  if (!taken.has(base.toLowerCase())) return base
+  for (let i = 2; ; i++) if (!taken.has(`${base} ${i}`.toLowerCase())) return `${base} ${i}`
+}
+
+/**
+ * What restoring a workspace has to do, given what's on screen now.
+ *  wanted     the workspace's sessions that still exist, capped at maxTiles
+ *  close      tile panes showing something the workspace doesn't hold
+ *  inPlace    a session to load into main when main shows something else
+ *             (main can't close; it is reused instead)
+ *  openTiles  sessions to open as new tiles, in order
+ * `open` is openSessions() output; `exists` filters deleted sessions.
+ */
+export function planRestore({ sessions, open, mainStoredSessionId = null, exists = () => true, maxTiles = Infinity }) {
+  const wanted = sessions.filter(exists).slice(0, Math.max(1, maxTiles))
+  const want = new Set(wanted)
+  const close = open.filter(o => o.paneId !== 'workspace' && !want.has(o.storedSessionId)).map(o => o.paneId)
+  const onScreen = new Set(open.filter(o => o.paneId === 'workspace' || want.has(o.storedSessionId)).map(o => o.storedSessionId))
+  let inPlace = null
+  if (!mainStoredSessionId || !want.has(mainStoredSessionId)) {
+    inPlace = wanted.find(id => !onScreen.has(id)) ?? null
+    // Nothing new to load into main: close it like its tab's ✕ (core
+    // promotes a neighbour tile), so only the workspace stays open.
+    if (!inPlace && mainStoredSessionId && wanted.length) close.push('workspace')
+  }
+  const openTiles = wanted.filter(id => id !== inPlace && !onScreen.has(id))
+  return { wanted, close, inPlace, openTiles }
+}
+
+// ---------------------------------------------------------------------------
+// Keybind display
+// ---------------------------------------------------------------------------
+
+/** The user's live combos for `actionId`: their stored override (core keeps
+ *  only the diff from defaults; [] = unbound), else the shipped defaults. */
+export function liveCombos(overrides, actionId, defaults = []) {
+  const own = overrides && Object.prototype.hasOwnProperty.call(overrides, actionId) ? overrides[actionId] : null
+  return Array.isArray(own) ? own.filter(c => typeof c === 'string') : defaults
+}
+
+const KEY_LABELS = { left: '←', right: '→', up: '↑', down: '↓', enter: '↵', space: 'Space', escape: 'Esc', backspace: '⌫', tab: '⇥' }
+const MOD_LABELS = { mac: { mod: '⌘', ctrl: '⌃', alt: '⌥', shift: '⇧' }, other: { mod: 'Ctrl', ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift' } }
+
+/** One key-cap label per token: `ctrl+alt+left` → ['Ctrl', 'Alt', '←']. */
+export function comboKeys(combo, mac = false) {
+  const parts = String(combo).split('+')
+  const base = parts.pop() ?? ''
+  const mods = MOD_LABELS[mac ? 'mac' : 'other']
+  const label = KEY_LABELS[base] ?? (/^f\d{1,2}$/.test(base) || base.length === 1 ? base.toUpperCase() : base)
+  return [...parts.map(m => mods[m] ?? m), label]
+}
+
+/** Four directional combos that differ only in their arrow collapse to one
+ *  row of caps: ['Ctrl', 'Alt', '←↑↓→']. Null when they don't line up. */
+export function arrowKeys(combos, mac = false) {
+  const keys = combos.map(c => (c ? comboKeys(c, mac) : null))
+  if (keys.some(k => !k)) return null
+  const mods = keys.map(k => k.slice(0, -1).join('+'))
+  if (new Set(mods).size !== 1) return null
+  return [...keys[0].slice(0, -1), keys.map(k => k[k.length - 1]).join('')]
 }
 
 /** Leaf rects of an arrangement spec (equal weights unless given). */
