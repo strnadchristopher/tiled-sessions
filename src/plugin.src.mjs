@@ -61,6 +61,8 @@ const SIDEBAR_ESTIMATE = 280
 /** The upstream hook ships `dock`, `sessionLayout` and `host.layout` together. */
 const hasTiling = () => Boolean(host.state?.sessionLayout && typeof host.layout?.closePane === 'function')
 /** Layouts need `host.layout.arrangeSessions` (same upstream PR, later revision). */
+/** Newer layout SDK: plugins may take over a chat strip's "+". */
+const canRedirectPlus = () => hasTiling() && typeof host.layout?.redirectNewSessionTab === 'function'
 const canArrange = () => hasTiling() && typeof host.layout?.arrangeSessions === 'function'
 const canPin = () => typeof host.sessions?.pin === 'function'
 /** Rename goes through the gateway's session.title RPC, which needs the
@@ -382,20 +384,13 @@ function createController(ctx) {
     host.layout.newChatTile({ pane, pos: 'right' })
   }
 
-  /** The "+" at the end of a chat zone's tab strip: core stacks a new session
-   *  tab there. With plus_new_tile on, open it as a new tile beside that zone
-   *  instead. Capture phase, so core's handler never runs for the clicks we take. */
-  function onStripPlus(e) {
-    if (!$settings.get().plus_new_tile || e.button !== 0) return
-    const btn = e.target?.closest?.('button')
-    if (!btn || !btn.querySelector('.codicon-add') || btn.closest('[data-tree-tab]')) return
-    const strip = btn.closest('[data-zone-tabstrip]')
-    const group = groupById(layout()?.root ?? null, strip?.getAttribute('data-zone-tabstrip'))
-    // Only a strip whose active tab is a chat: there the "+" mints a session.
-    if (!group || !isSessionPane(group.active)) return
-    e.preventDefault()
-    e.stopImmediatePropagation()
-    newTile(group.active)
+  /** The "+" after a chat zone's tabs (`host.layout.redirectNewSessionTab`):
+   *  with plus_new_tile on, the new session opens as a tile beside that zone
+   *  instead of stacking a tab. False lets core open its stock tab. */
+  function onStripPlus(pane) {
+    if (!$settings.get().plus_new_tile) return false
+    newTile(pane)
+    return true
   }
 
   function close(storedId) {
@@ -1604,10 +1599,10 @@ function makeSettings(ctl, ctx) {
         jsx(SettingsHeading, { children: 'Opening sessions' }),
         jsx(ToggleRow, {
           label: 'Tab-strip + opens a new tile',
-          description: hasTiling()
+          description: canRedirectPlus()
             ? 'The + after a chat\u2019s tabs opens a new session as its own tile. Off: it stacks a new tab, like stock Hermes.'
-            : `Needs ${NEEDS}.`,
-          checked: s.plus_new_tile && hasTiling(),
+            : `Needs ${NEEDS} with redirectNewSessionTab.`,
+          checked: s.plus_new_tile && canRedirectPlus(),
           onChange: on => ctl.setSettings({ plus_new_tile: on })
         }),
         jsx(ToggleRow, {
@@ -1691,10 +1686,7 @@ export default {
       // Re-tile after core finishes its own write (a microtask later), never inside it.
       ctx.onDispose(host.state.sessionLayout.listen(() => queueMicrotask(() => ctl.onLayout())))
     }
-    if (hasTiling()) {
-      window.addEventListener('click', ctl.onStripPlus, true)
-      ctx.onDispose(() => window.removeEventListener('click', ctl.onStripPlus, true))
-    }
+    if (canRedirectPlus()) ctx.onDispose(host.layout.redirectNewSessionTab(ctl.onStripPlus))
     const invalidate = () => void queryClient.invalidateQueries({ queryKey: LIST_KEY })
     ctx.onEvent('sessions.changed', invalidate)
     ctx.onEvent('session.title', invalidate)
