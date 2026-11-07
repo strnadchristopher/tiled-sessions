@@ -696,7 +696,6 @@ const SIDEBAR_ESTIMATE = 280
 // Core keeps the user's keybind overrides here (only the diff from defaults).
 // No SDK reader exists for live bindings, so the shortcuts card reads it and
 // falls back to our shipped defaults when it is absent or unreadable.
-const KEYBINDS_STORAGE = 'hermes.desktop.keybinds'
 
 /** The upstream hook ships `dock`, `sessionLayout` and `host.layout` together. */
 const hasTiling = () => Boolean(host.state?.sessionLayout && typeof host.layout?.closePane === 'function')
@@ -1604,18 +1603,10 @@ function LayoutSwitcher({ ctl }) {
 
 // -- shortcuts card -----------------------------------------------------------
 
-function readKeybindOverrides() {
-  try {
-    const raw = globalThis.localStorage?.getItem(KEYBINDS_STORAGE)
-    const parsed = raw ? JSON.parse(raw) : null
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
-  } catch {
-    return null
-  }
-}
-
 const actionDefaults = id => ACTIONS.find(a => a[0] === id)?.[2] ?? []
-const firstCombo = (overrides, id) => liveCombos(overrides, `${ID}.${id}`, actionDefaults(id))[0] ?? null
+// Live bindings through the SDK hook; older Desktops show the defaults.
+const useCombos = SDK.useKeybindCombos ?? ((_id, fallback) => fallback)
+const useFirstCombo = id => useCombos(`${ID}.${id}`, actionDefaults(id))[0] ?? null
 
 function Keys({ keys }) {
   return jsx('span', {
@@ -1636,16 +1627,16 @@ function Keys({ keys }) {
   })
 }
 
+const HINT_ACTIONS = ['focus-left', 'focus-right', 'focus-up', 'focus-down', 'new-tile', 'cycle-layout', 'fullscreen']
+
 /** First-run card: the four shortcuts worth learning, with the user's live keys. */
 function ShortcutsHint({ ctl }) {
   const s = useValue(ctl.$settings)
+  // Fixed hook order: one live lookup per action, every render.
+  const combos = Object.fromEntries(HINT_ACTIONS.map(id => [id, useFirstCombo(id)]))
   if (s.hint_dismissed) return null
-  const overrides = readKeybindOverrides()
-  const arrows = arrowKeys(['focus-left', 'focus-right', 'focus-up', 'focus-down'].map(id => firstCombo(overrides, id)), IS_MAC)
-  const one = id => {
-    const c = firstCombo(overrides, id)
-    return c ? comboKeys(c, IS_MAC) : null
-  }
+  const arrows = arrowKeys(['focus-left', 'focus-right', 'focus-up', 'focus-down'].map(id => combos[id]), IS_MAC)
+  const one = id => (combos[id] ? comboKeys(combos[id], IS_MAC) : null)
   const rows = [
     ['Move focus', arrows ?? one('focus-left')],
     ['New tile', one('new-tile')],
