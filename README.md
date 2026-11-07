@@ -32,7 +32,7 @@ hermes plugins install tiled-sessions
 - **Fullscreen.** `Ctrl+Alt+F` fills the chat area with the focused tile; the others fold into a slim strip along the bottom, so a click (or `Ctrl+Alt+↓`) still reaches them and fullscreen follows. Press it again, open or close a tile, or click the status chip to bring the layout back.
 - **Auto-tiling.** Whenever a tile opens or closes (by click, `Ctrl+W`, a tab's ✕ or a shortcut), every tile is laid out again. Dragging a sash to resize is left alone until the next open or close, except the Master divider, which is remembered. `Ctrl+Alt+R` re-tiles on demand and drops hand-dragged sizes, including a remembered Master size (back to the preset picked in settings). You can turn auto-tiling off and place tiles yourself.
 - **Saved workspaces.** The save button on the *Open* list (or `Ctrl+Alt+S`) keeps the open tiles and the layout under a name. Click it in the *Workspaces* list, pick it with `Ctrl+Alt+O`, or run *Tiles: Restore …* from the palette, and those sessions come back as tiles in that order. Sessions deleted since are skipped. Right-click a workspace to rename, update or delete it; they're also listed in settings.
-- **New chat in a new tile.** `Ctrl+Alt+Enter` starts a fresh chat in its own tile and focuses it, the way a tiling WM opens a terminal.
+- **New chat in a new tile.** `Ctrl+Alt+Enter` starts a fresh chat in its own tile and focuses it, the way a tiling WM opens a terminal. The **+** after a chat's tabs does the same, opening the new tile beside that chat instead of stacking another tab. Hermes has no plugin hook for that button, so the plugin listens for clicks on it; turn the setting off and the click goes to Hermes untouched.
 - **The keyboard follows focus.** Moving focus moves the caret too, so typing and `Ctrl+W` land in the focused tile. (Hermes' `Ctrl+W` acts on the tile under the pointer first, when the pointer is over one.)
 - **A Tiles pane** in the sidebar: a layout switcher, a shortcuts card on first run (your actual bindings; close it and *Tiles: Show shortcuts* brings it back), search, then *Pinned*, *Open* (tiles in on-screen order, focused one highlighted, drag a row to move its tile), *Workspaces* and *Sessions*.
   - **Search** filters every list by title and opening message as you type. `Escape` clears it.
@@ -69,6 +69,7 @@ hermes plugins install tiled-sessions
 | Master size | 50, 55, 60 or 66%. A size you dragged shows up as an extra, custom value. |
 | Auto-tile | Re-tile whenever a tile opens or closes. |
 | Split target | With auto-tile off: split the largest or the focused tile. |
+| Tab-strip + opens a new tile | On by default. The + after a chat's tabs opens a new session as its own tile. Off: it stacks a new tab, like stock Hermes. |
 | Click opens a new tile | Off: a click replaces the focused chat, like stock Hermes. |
 | Replace-in-place modifier | `Alt` or `Shift` + click opens in place. |
 | Max tiles | 4, 6, 8 or 12; past it, a click opens in place. |
