@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import {
   arrangement,
+  transpose,
   groupIdOfPane,
   specRects,
   chatZones,
@@ -360,6 +361,32 @@ describe('layouts', () => {
   it('columns: equal widths, full height', () => {
     const r = [...specRects(arrangement('columns', ids(3), WIDE), WIDE).values()]
     assert.ok(r.every(x => Math.abs(x.w - WIDE.w / 3) < 1e-6 && x.h === 1000))
+  })
+
+  it('flip: columns become rows', () => {
+    const r = [...specRects(arrangement('columns', ids(3), WIDE, { flip: true }), WIDE).values()]
+    assert.ok(r.every(x => x.w === WIDE.w && Math.abs(x.h - WIDE.h / 3) < 1e-6))
+  })
+
+  it('flip: master moves to the top at the same ratio, the stack runs side by side', () => {
+    const r = specRects(arrangement('master', ids(4), WIDE, { masterRatio: 0.6, flip: true }), WIDE)
+    assert.deepEqual([r.get('p0').w, Math.round(r.get('p0').h)], [1640, 600])
+    for (const p of ['p1', 'p2', 'p3']) {
+      assert.equal(Math.round(r.get(p).y), 600)
+      assert.equal(Math.round(r.get(p).w), 547)
+    }
+  })
+
+  it('flip: grid transposes (6 on a wide area: 3 rows × 2 columns)', () => {
+    const r = [...specRects(arrangement('grid', ids(6), WIDE, { flip: true }), WIDE).values()]
+    assert.equal(new Set(r.map(x => Math.round(x.x))).size, 2)
+    assert.equal(new Set(r.map(x => Math.round(x.y))).size, 3)
+  })
+
+  it('flip: dwindle starts with a stacked split, and flipping twice is a no-op', () => {
+    const spec = arrangement('dwindle', ids(4), WIDE, { flip: true })
+    assert.equal(spec.orientation, 'column')
+    assert.deepEqual(transpose(transpose(spec)), spec)
   })
 
   it('one pane is a bare leaf; none is null', () => {

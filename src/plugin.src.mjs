@@ -44,7 +44,8 @@ const DEFAULTS = {
   click: 'new-tile',
   plus_new_tile: true,
   replace_modifier: 'alt',
-  hint_dismissed: false
+  hint_dismissed: false,
+  flipped: false
 }
 const LAYOUT_INFO = {
   grid: { label: 'Grid', blurb: 'Every tile the same size.' },
@@ -195,7 +196,7 @@ function createController(ctx) {
     if (zones.length < 2) return true
     const s = $settings.get()
     const paneOfGroup = new Map(zones.map(z => [z.groupId, z.pane]))
-    const spec = arrangement(s.layout, order.map(g => paneOfGroup.get(g)), engineView().area, { masterRatio: s.master_ratio })
+    const spec = arrangement(s.layout, order.map(g => paneOfGroup.get(g)), engineView().area, { masterRatio: s.master_ratio, flip: Boolean(s.flipped) })
     const ok = host.layout.arrangeSessions(spec)
     if (!ok && !warned) {
       warned = true
@@ -459,6 +460,14 @@ function createController(ctx) {
     if (announce && !canArrange()) host.notify({ kind: 'info', message: `Tiles: ${LAYOUT_INFO[next].label}` })
   }
 
+  /** Ctrl+Alt+/: turn the whole layout (rows ↔ columns), like Hyprland's togglesplit. */
+  function toggleFlip() {
+    const flipped = !$settings.get().flipped
+    setSettings({ flipped })
+    if (canArrange()) retile({ force: true })
+    else host.notify({ kind: 'info', message: `Tiled Sessions: flipping needs ${NEEDS} with arrangeSessions.` })
+  }
+
   const cycleLayout = () => {
     const s = $settings.get()
     setLayout(nextLayout(s.layout, s.layouts_enabled), { announce: true })
@@ -669,6 +678,7 @@ function createController(ctx) {
     moveTile,
     promoteFocused,
     cycleLayout,
+    toggleFlip,
     equalizeAll,
     toggleFullscreen,
     openInPlace,
@@ -915,12 +925,12 @@ function Section({ label, count, action, children }) {
 }
 
 /** Mini diagram of a layout with four tiles, drawn from the real engine. */
-function LayoutGlyph({ layout, active, w = 34, h = 22 }) {
+function LayoutGlyph({ layout, active, flip = false, w = 34, h = 22 }) {
   const area = { x: 0, y: 0, w, h }
   const spec =
     layout === 'fullscreen'
       ? fullscreenArrangement(['a', 'b', 'c', 'd'], 'a', area, { minTileW: w / 3, peek: h / 6 })
-      : arrangement(layout, ['a', 'b', 'c', 'd'], area)
+      : arrangement(layout, ['a', 'b', 'c', 'd'], area, { flip })
   const tiles = specRects(spec, area)
   const gap = 1.5
   return jsx('span', {
@@ -950,37 +960,114 @@ function LayoutGlyph({ layout, active, w = 34, h = 22 }) {
   })
 }
 
-/** Layout switch for the Tiles pane header: the enabled layouts only. */
+/** Layout name as shown: flipped Columns reads as Rows; other flipped layouts get ⇅. */
+const layoutName = (id, flipped) => (!flipped ? LAYOUT_INFO[id].label : id === 'columns' ? 'Rows' : `${LAYOUT_INFO[id].label} ⇅`)
+
+/** Content width of the element behind `ref`, tracked live (0 until measured). */
+function useWidth() {
+  const ref = useRef(null)
+  const [w, setW] = useState(0)
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(entries => setW(Math.round(entries[0]?.contentRect.width ?? 0)))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, w]
+}
+
+// Below this width per cell the labels go (icons + tooltips); below the
+// next the cells wrap onto more rows instead of squashing the glyphs.
+const LABEL_CELL = 54
+const ICON_CELL = 34
+
+/** Layout switch for the Tiles pane header: the enabled layouts, plus the
+ *  flip (rows ↔ columns) toggle. Adapts to the sidebar's width. */
 function LayoutSwitcher({ ctl }) {
   const s = useValue(ctl.$settings)
   const fullscreen = useValue(ctl.$fullscreen)
+  const flipCombo = useFirstCombo('flip')
+  const [ref, width] = useWidth()
   const offered = enabledLayouts(s.layouts_enabled)
-  if (offered.length < 2) return null
-  return jsx('div', {
-    role: 'radiogroup',
-    'aria-label': 'Tile layout',
+  const flipped = Boolean(s.flipped)
+  const radios = offered.length >= 2 ? offered : []
+  const cells = radios.length + 1
+  const per = width ? (width - 8 - 4 * (cells - 1)) / cells : Infinity
+  const labels = per >= LABEL_CELL
+  const wrap = per < ICON_CELL
+  const cellClass = on =>
+    cn(
+      'flex min-w-0 flex-col items-center justify-center gap-1 rounded-md px-1 text-[0.6875rem] transition-colors',
+      labels ? 'pb-1 pt-1.5' : 'py-1.5',
+      on ? 'text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
+    )
+  const label = text => (labels ? jsx('span', { className: 'max-w-full truncate', children: text }) : null)
+  const flipKeys = flipCombo ? ` (${comboKeys(flipCombo, IS_MAC).join('+')})` : ''
+  const flipButton = jsxs(
+    'button',
+    {
+      type: 'button',
+      'aria-pressed': flipped,
+      'aria-label': 'Flip orientation',
+      title: `Flip orientation: ${flipped ? 'rows back to columns' : 'columns become rows'}${flipKeys}`,
+      // A toggle, not a layout: pressed shows as an accent icon, not the
+      // selected-layout wash, so it never reads as a second active layout.
+      className: cellClass(false),
+      style: flipped ? { color: 'var(--ui-accent)' } : undefined,
+      onClick: () => ctl.toggleFlip(),
+      children: [
+        jsx('span', {
+          'aria-hidden': true,
+          className: 'grid place-items-center',
+          style: { width: 28, height: 18 },
+          children: jsx(Codicon, {
+            name: 'arrow-swap',
+            className: 'text-[0.875rem]',
+            style: { transform: flipped ? 'rotate(90deg)' : 'none', transition: 'transform 150ms ease' }
+          })
+        }),
+        label('Flip')
+      ]
+    },
+    'flip'
+  )
+  return jsxs('div', {
+    ref,
     className: 'mx-1 mb-3 grid gap-1 rounded-lg p-1',
-    style: { gridTemplateColumns: `repeat(${offered.length}, minmax(0, 1fr))`, background: 'color-mix(in srgb, var(--ui-text-secondary) 7%, transparent)' },
-    children: offered.map(id => {
-      const on = s.layout === id && !fullscreen
-      return jsxs(
-        'button',
-        {
-          type: 'button',
-          role: 'radio',
-          'aria-checked': on,
-          title: `${LAYOUT_INFO[id].label}: ${LAYOUT_INFO[id].blurb}`,
-          className: cn(
-            'flex flex-col items-center gap-1 rounded-md px-1 pb-1 pt-1.5 text-[0.6875rem] transition-colors',
-            on ? 'text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
-          ),
-          style: on ? ACCENT_WASH : undefined,
-          onClick: () => ctl.setLayout(id),
-          children: [jsx(LayoutGlyph, { layout: id, active: on, w: 28, h: 18 }), LAYOUT_INFO[id].label]
-        },
-        id
-      )
-    })
+    style: {
+      gridTemplateColumns: wrap ? `repeat(auto-fill, minmax(${ICON_CELL}px, 1fr))` : `repeat(${cells}, minmax(0, 1fr))`,
+      background: 'color-mix(in srgb, var(--ui-text-secondary) 7%, transparent)'
+    },
+    children: [
+      radios.length
+        ? jsx('div', {
+            role: 'radiogroup',
+            'aria-label': 'Tile layout',
+            // Children join the parent grid so the flip button wraps with them.
+            style: { display: 'contents' },
+            children: radios.map(id => {
+              const on = s.layout === id && !fullscreen
+              return jsxs(
+                'button',
+                {
+                  type: 'button',
+                  role: 'radio',
+                  'aria-checked': on,
+                  'aria-label': LAYOUT_INFO[id].label,
+                  title: `${LAYOUT_INFO[id].label}: ${LAYOUT_INFO[id].blurb}`,
+                  className: cellClass(on),
+                  style: on ? ACCENT_WASH : undefined,
+                  onClick: () => ctl.setLayout(id),
+                  children: [jsx(LayoutGlyph, { layout: id, active: on, flip: flipped, w: 28, h: 18 }), label(LAYOUT_INFO[id].label)]
+                },
+                id
+              )
+            })
+          })
+        : null,
+      flipButton
+    ]
   })
 }
 
@@ -991,9 +1078,10 @@ const actionDefaults = id => ACTIONS.find(a => a[0] === id)?.[2] ?? []
 const useCombos = SDK.useKeybindCombos ?? ((_id, fallback) => fallback)
 const useFirstCombo = id => useCombos(`${ID}.${id}`, actionDefaults(id))[0] ?? null
 
-function Keys({ keys }) {
+function Keys({ keys, wrap = false }) {
   return jsx('span', {
     className: 'inline-flex shrink-0 items-center gap-0.5',
+    style: wrap ? { flexWrap: 'wrap', flexShrink: 1, minWidth: 0 } : undefined,
     children: keys.map((k, i) =>
       Kbd
         ? jsx(Kbd, { size: 'sm', variant: 'ghost', children: k }, i)
@@ -1010,11 +1098,12 @@ function Keys({ keys }) {
   })
 }
 
-const HINT_ACTIONS = ['focus-left', 'focus-right', 'focus-up', 'focus-down', 'new-tile', 'cycle-layout', 'fullscreen']
+const HINT_ACTIONS = ['focus-left', 'focus-right', 'focus-up', 'focus-down', 'new-tile', 'cycle-layout', 'flip', 'fullscreen']
 
 /** First-run card: the four shortcuts worth learning, with the user's live keys. */
 function ShortcutsHint({ ctl }) {
   const s = useValue(ctl.$settings)
+  const [ref, width] = useWidth()
   // Fixed hook order: one live lookup per action, every render.
   const combos = Object.fromEntries(HINT_ACTIONS.map(id => [id, useFirstCombo(id)]))
   if (s.hint_dismissed) return null
@@ -1024,10 +1113,14 @@ function ShortcutsHint({ ctl }) {
     ['Move focus', arrows ?? one('focus-left')],
     ['New tile', one('new-tile')],
     ['Next layout', one('cycle-layout')],
+    ['Flip rows/columns', one('flip')],
     ['Fullscreen', one('fullscreen')]
   ].filter(r => r[1])
   if (!rows.length) return null
+  // Narrow sidebar: each label sits above its keys instead of beside them.
+  const stacked = width > 0 && width < 200
   return jsxs('div', {
+    ref,
     className: 'relative mx-1 mb-3 rounded-lg py-2 pl-2.5 pr-2',
     style: { background: 'color-mix(in srgb, var(--ui-text-secondary) 7%, transparent)' },
     children: [
@@ -1047,10 +1140,10 @@ function ShortcutsHint({ ctl }) {
       }),
       jsx('dl', {
         className: 'grid items-center gap-x-3 gap-y-1',
-        style: { gridTemplateColumns: 'minmax(0, 1fr) auto' },
+        style: { gridTemplateColumns: stacked ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) auto' },
         children: rows.flatMap(([label, keys]) => [
-          jsx('dt', { className: 'truncate text-xs text-(--ui-text-tertiary)', children: label }, `${label}:t`),
-          jsx('dd', { className: 'flex justify-end', children: jsx(Keys, { keys }) }, `${label}:d`)
+          jsx('dt', { className: 'truncate text-xs text-(--ui-text-tertiary)', style: stacked ? { marginTop: 4 } : undefined, children: label }, `${label}:t`),
+          jsx('dd', { className: 'flex', style: { justifyContent: stacked ? 'flex-start' : 'flex-end', minWidth: 0 }, children: jsx(Keys, { keys, wrap: stacked }) }, `${label}:d`)
         ])
       })
     ]
@@ -1421,6 +1514,7 @@ const ACTIONS = [
   ['new-tile', 'New chat in a new tile', ['ctrl+alt+enter'], c => c.newTile()],
   ['close', 'Close focused tile', ['ctrl+alt+w'], c => c.close(host.state.focusedStoredSessionId.get())],
   ['cycle-layout', 'Next layout', ['ctrl+alt+space'], c => c.cycleLayout()],
+  ['flip', 'Flip orientation (rows ↔ columns)', ['ctrl+alt+/'], c => c.toggleFlip()],
   ['fullscreen', 'Toggle fullscreen tile', ['ctrl+alt+f'], c => c.toggleFullscreen()],
   ['promote', 'Make focused tile the master', ['ctrl+alt+m'], c => c.promoteFocused()],
   ['equalize', 'Re-tile and reset sizes', ['ctrl+alt+r'], c => c.equalizeAll()],
@@ -1482,7 +1576,7 @@ function LayoutCards({ ctl, s }) {
               className: cn('flex flex-1 flex-col items-start gap-2 rounded-lg p-3 text-left', on && !current && 'hover:bg-(--chrome-action-hover)'),
               onClick: () => ctl.setLayout(id),
               children: [
-                jsx(LayoutGlyph, { layout: id, active: current, w: 64, h: 40 }),
+                jsx(LayoutGlyph, { layout: id, active: current, flip: Boolean(s.flipped), w: 64, h: 40 }),
                 jsx('span', { className: 'text-sm font-medium text-foreground', children: LAYOUT_INFO[id].label }),
                 jsx('span', { className: 'text-xs leading-snug text-(--ui-text-tertiary)', children: LAYOUT_INFO[id].blurb })
               ]
@@ -1664,8 +1758,8 @@ function makeStatusChip(ctl) {
         className: cn('flex h-full items-center gap-1.5 px-1.5 hover:text-foreground', fullscreen ? 'text-(--ui-text-secondary)' : 'text-(--ui-text-tertiary)'),
         onClick: () => (fullscreen ? ctl.toggleFullscreen() : ctl.cycleLayout()),
         children: [
-          jsx(LayoutGlyph, { layout: fullscreen ? 'fullscreen' : s.layout, active: false, w: 16, h: 11 }),
-          `${fullscreen ? 'Fullscreen' : LAYOUT_INFO[s.layout].label} · ${n}`
+          jsx(LayoutGlyph, { layout: fullscreen ? 'fullscreen' : s.layout, active: false, flip: !fullscreen && Boolean(s.flipped), w: 16, h: 11 }),
+          `${fullscreen ? 'Fullscreen' : layoutName(s.layout, s.flipped)} · ${n}`
         ]
       },
       'chip'

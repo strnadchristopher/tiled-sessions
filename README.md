@@ -29,12 +29,14 @@ hermes plugins install tiled-sessions
   | **Dwindle** | Hyprland's default. Each new tile halves the last along its longer side, making a spiral. |
   | **Columns** | Side by side, equal widths. Made for ultrawides. |
 
+- **Flip orientation.** `Ctrl+Alt+/` (or the ⇅ button beside the layouts) turns the whole layout, like Hyprland's `togglesplit`: Columns become rows, Master puts the big tile on top, a 3×2 grid becomes 2×3. It sticks across layouts until you press it again.
+
 - **Fullscreen.** `Ctrl+Alt+F` fills the chat area with the focused tile; the others fold into a slim strip along the bottom, so a click (or `Ctrl+Alt+↓`) still reaches them and fullscreen follows. Press it again, open or close a tile, or click the status chip to bring the layout back.
 - **Auto-tiling.** Whenever a tile opens or closes (by click, `Ctrl+W`, a tab's ✕ or a shortcut), every tile is laid out again. Dragging a sash to resize is left alone until the next open or close, except the Master divider, which is remembered. `Ctrl+Alt+R` re-tiles on demand and drops hand-dragged sizes, including a remembered Master size (back to the preset picked in settings). You can turn auto-tiling off and place tiles yourself.
 - **Saved workspaces.** The save button on the *Open* list (or `Ctrl+Alt+S`) keeps the open tiles and the layout under a name. Click it in the *Workspaces* list, pick it with `Ctrl+Alt+O`, or run *Tiles: Restore …* from the palette, and those sessions come back as tiles in that order. Sessions deleted since are skipped. Right-click a workspace to rename, update or delete it; they're also listed in settings.
 - **New chat in a new tile.** `Ctrl+Alt+Enter` starts a fresh chat in its own tile and focuses it, the way a tiling WM opens a terminal. The **+** after a chat's tabs does the same, opening the new tile beside that chat instead of stacking another tab. Turn the setting off and the + stacks a tab as usual.
 - **The keyboard follows focus.** Moving focus moves the caret too, so typing and `Ctrl+W` land in the focused tile. (Hermes' `Ctrl+W` acts on the tile under the pointer first, when the pointer is over one.)
-- **A Tiles pane** in the sidebar: a layout switcher, a shortcuts card on first run (your actual bindings; close it and *Tiles: Show shortcuts* brings it back), search, then *Pinned*, *Open* (tiles in on-screen order, focused one highlighted, drag a row to move its tile), *Workspaces* and *Sessions*.
+- **A Tiles pane** in the sidebar: a layout switcher (labels give way to icons, and then wrap, when the sidebar is narrow), a shortcuts card on first run (your actual bindings; close it and *Tiles: Show shortcuts* brings it back), search, then *Pinned*, *Open* (tiles in on-screen order, focused one highlighted, drag a row to move its tile), *Workspaces* and *Sessions*.
   - **Search** filters every list by title and opening message as you type. `Escape` clears it.
   - **Right-click any session** to pin or unpin it, rename it (open sessions; `F2` works too), move its tile to main, or close its tile.
 - **Every shortcut is editable** right on the plugin's settings page (`Settings → Plugins → Tiled Sessions`), with the same recorder, conflict warnings and reset as `Settings → Keybinds`:
@@ -46,6 +48,7 @@ hermes plugins install tiled-sessions
   | New chat in a new tile | `Ctrl+Alt+Enter` |
   | Close the focused tile | `Ctrl+Alt+W`, or Hermes' own `Ctrl+W` / `⌘W` |
   | Next layout | `Ctrl+Alt+Space` |
+  | Flip orientation (rows ↔ columns) | `Ctrl+Alt+/` |
   | Fullscreen the focused tile | `Ctrl+Alt+F` |
   | Make the focused tile the master | `Ctrl+Alt+M` |
   | Re-tile and reset sizes | `Ctrl+Alt+R` |

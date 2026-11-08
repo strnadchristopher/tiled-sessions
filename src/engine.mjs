@@ -347,7 +347,11 @@ const column = children => (children.length === 1 ? children[0] : { orientation:
  *  dwindle  Hyprland's default: each tile halves the previous along its long side
  *  columns  side by side, equal widths
  */
-export function arrangement(layout, panes, area, { masterRatio = 0.55 } = {}) {
+export function arrangement(layout, panes, area, { masterRatio = 0.55, flip = false } = {}) {
+  // Flipped: the normal layout with every split turned, so columns become
+  // rows, master-left becomes master-top, a 2×3 grid 3×2 (Hyprland's
+  // togglesplit, applied to the whole layout).
+  if (flip) return transpose(arrangement(layout, panes, area, { masterRatio }))
   const n = panes.length
   if (n === 0) return null
   if (n === 1) return leafOf(panes[0])
@@ -373,6 +377,12 @@ export function arrangement(layout, panes, area, { masterRatio = 0.55 } = {}) {
   const lines = []
   for (let r = 0; r < rows; r++) lines.push(row(leaves.slice(r * cols, (r + 1) * cols)))
   return column(lines.filter(l => l))
+}
+
+/** `spec` with every split's orientation turned (row ↔ column); weights kept. */
+export function transpose(spec) {
+  if (!spec || !spec.children) return spec
+  return { ...spec, orientation: spec.orientation === 'row' ? 'column' : 'row', children: spec.children.map(transpose) }
 }
 
 /** The user's enabled layouts in LAYOUTS order; never empty (all on when
