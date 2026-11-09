@@ -511,6 +511,48 @@ export function matchesQuery(row, query) {
 }
 
 // ---------------------------------------------------------------------------
+// Source sections — mirrors core's sidebar (lib/session-source.ts): local
+// sessions form "Sessions", each messaging platform gets its own section
+// (newest platform first), cron runs sit in their own section.
+// ---------------------------------------------------------------------------
+
+export const MESSAGING_SOURCES = [
+  'telegram', 'discord', 'slack', 'mattermost', 'matrix', 'signal', 'whatsapp', 'bluebubbles', 'photon',
+  'homeassistant', 'email', 'sms', 'webhook', 'api_server', 'weixin', 'wecom', 'qqbot', 'yuanbao', 'dingtalk', 'feishu'
+]
+const MESSAGING_SET = new Set(MESSAGING_SOURCES)
+
+const SOURCE_LABELS = {
+  api_server: 'API', bluebubbles: 'iMessage', dingtalk: 'DingTalk', discord: 'Discord', email: 'Email',
+  feishu: 'Feishu', homeassistant: 'Home Assistant', matrix: 'Matrix', mattermost: 'Mattermost', photon: 'Photon',
+  qqbot: 'QQ', signal: 'Signal', slack: 'Slack', sms: 'SMS', telegram: 'Telegram', webhook: 'Webhook',
+  wecom: 'WeCom', weixin: 'WeChat', whatsapp: 'WhatsApp', yuanbao: 'Yuanbao'
+}
+
+export const sourceOf = row => String(row?.source ?? '').trim().toLowerCase()
+export const sourceLabel = id => SOURCE_LABELS[id] ?? id
+
+/** { sessions, platforms: [{ id, label, rows }], cron } — input order kept within each. */
+export function groupBySource(rows = []) {
+  const sessions = []
+  const cron = []
+  const byPlatform = new Map()
+  for (const r of rows) {
+    const src = sourceOf(r)
+    if (src === 'cron') cron.push(r)
+    else if (MESSAGING_SET.has(src)) {
+      if (!byPlatform.has(src)) byPlatform.set(src, [])
+      byPlatform.get(src).push(r)
+    } else sessions.push(r)
+  }
+  const newest = list => Math.max(...list.map(r => r.last_active ?? r.updated_at ?? r.started_at ?? 0))
+  const platforms = [...byPlatform.entries()]
+    .map(([id, list]) => ({ id, label: sourceLabel(id), rows: list }))
+    .sort((a, b) => newest(b.rows) - newest(a.rows))
+  return { sessions, platforms, cron }
+}
+
+// ---------------------------------------------------------------------------
 // Saved workspaces
 // ---------------------------------------------------------------------------
 

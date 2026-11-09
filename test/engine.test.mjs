@@ -40,6 +40,7 @@ import {
   masterRatioFromCore,
   clampRatio,
   matchesQuery,
+  groupBySource,
   makeWorkspace,
   readWorkspaces,
   uniqueName,
@@ -630,5 +631,29 @@ describe('keybind display', () => {
     assert.deepEqual(arrowKeys(['ctrl+alt+left', 'ctrl+alt+right', 'ctrl+alt+up', 'ctrl+alt+down']), ['Ctrl', 'Alt', '←→↑↓'])
     assert.equal(arrowKeys(['ctrl+alt+left', 'ctrl+right', 'ctrl+alt+up', 'ctrl+alt+down']), null)
     assert.equal(arrowKeys(['ctrl+alt+left', null, 'ctrl+alt+up', 'ctrl+alt+down']), null)
+  })
+})
+
+describe('groupBySource', () => {
+  it('splits local, per-platform and cron like the core sidebar', () => {
+    const rows = [
+      { id: 'a', source: 'desktop', started_at: 9 },
+      { id: 't1', source: 'telegram', started_at: 5 },
+      { id: 'c', source: 'cron', started_at: 8 },
+      { id: 'd1', source: 'Discord', started_at: 7 },
+      { id: 'b', source: 'cli', started_at: 4 },
+      { id: 't2', source: 'telegram', started_at: 3 },
+      { id: 'u', started_at: 2 }
+    ]
+    const g = groupBySource(rows)
+    assert.deepEqual(g.sessions.map(r => r.id), ['a', 'b', 'u'])
+    assert.deepEqual(g.cron.map(r => r.id), ['c'])
+    assert.deepEqual(g.platforms.map(p => [p.id, p.label, p.rows.map(r => r.id)]), [
+      ['discord', 'Discord', ['d1']],
+      ['telegram', 'Telegram', ['t1', 't2']]
+    ])
+  })
+  it('handles an empty list', () => {
+    assert.deepEqual(groupBySource([]), { sessions: [], platforms: [], cron: [] })
   })
 })
