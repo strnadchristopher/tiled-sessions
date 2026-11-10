@@ -582,6 +582,63 @@ function groupBySource(rows = []) {
 }
 
 // ---------------------------------------------------------------------------
+// Day sub-groups (same calendar buckets as the core sidebar)
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86400000
+const ROLLOVER_H = 4 // core's day ends at 4 AM local, so a 1 AM chat joins the evening before
+const dayStart = ms => {
+  const d = new Date(ms)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+const nominalDay = ms => dayStart(ms - ROLLOVER_H * 3600000)
+
+function localeWeekStart() {
+  try {
+    const loc = new Intl.Locale(new Intl.DateTimeFormat().resolvedOptions().locale)
+    const first = (loc.getWeekInfo?.() ?? loc.weekInfo)?.firstDay
+    return typeof first === 'number' ? first % 7 : 1
+  } catch {
+    return 1
+  }
+}
+
+/** Core's calendarBucket: today, yesterday, this week, last week, this month,
+ *  then one bucket per month (with the year when it isn't this year). */
+function dayBucket(seconds, nowMs = Date.now(), weekStartsOn = localeWeekStart()) {
+  const nominal = nominalDay(seconds * 1000)
+  const today = nominalDay(nowMs)
+  const diff = Math.round((today - nominal) / DAY_MS)
+  if (diff <= 0) return { key: 'today', label: 'Today' }
+  if (diff === 1) return { key: 'yesterday', label: 'Yesterday' }
+  const t = new Date(dayStart(today))
+  const weekStart = new Date(t.getFullYear(), t.getMonth(), t.getDate() - ((t.getDay() - weekStartsOn + 7) % 7)).getTime()
+  if (nominal >= weekStart) return { key: 'this-week', label: 'Earlier this week' }
+  const lastWeek = new Date(new Date(weekStart).getFullYear(), new Date(weekStart).getMonth(), new Date(weekStart).getDate() - 7).getTime()
+  if (nominal >= lastWeek) return { key: 'last-week', label: 'Last week' }
+  const d = new Date(nominal)
+  const n = new Date(today)
+  const sameYear = d.getFullYear() === n.getFullYear()
+  if (sameYear && d.getMonth() === n.getMonth()) return { key: 'this-month', label: 'Earlier this month' }
+  const fmt = new Intl.DateTimeFormat(undefined, sameYear ? { month: 'long' } : { month: 'long', year: 'numeric' })
+  return { key: `m-${d.getFullYear()}-${d.getMonth()}`, label: fmt.format(d) }
+}
+
+/** Split recency-ordered rows into consecutive day buckets. One bucket per
+ *  range, never per day; empty ranges never appear. */
+function groupByDay(rows = [], nowMs = Date.now(), weekStartsOn = localeWeekStart()) {
+  const out = []
+  for (const r of rows) {
+    const t = r.last_active ?? r.updated_at ?? r.started_at ?? 0
+    const b = dayBucket(t, nowMs, weekStartsOn)
+    const last = out[out.length - 1]
+    if (last && last.key === b.key) last.rows.push(r)
+    else out.push({ key: b.key, label: b.label, rows: [r] })
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // Saved workspaces
 // ---------------------------------------------------------------------------
 
@@ -2260,7 +2317,20 @@ function makePane(ctl) {
             })
           : null,
         bySource.sessions.length
-          ? jsx(Section, { label: 'Sessions', children: bySource.sessions.map(r => sessionRow('s', rowId(r), r)) })
+          ? jsx(Section, {
+              label: 'Sessions',
+              children: groupByDay(bySource.sessions).flatMap(g => [
+                jsx(
+                  'div',
+                  {
+                    className: 'flex h-5 items-center pl-2.5 pt-1 text-[0.625rem] font-medium text-(--ui-text-quaternary)',
+                    children: g.label
+                  },
+                  `day:${g.key}`
+                ),
+                ...g.rows.map(r => sessionRow('s', rowId(r), r))
+              ])
+            })
           : null,
         ...bySource.platforms.map(g =>
           jsx(

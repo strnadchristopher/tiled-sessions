@@ -41,6 +41,7 @@ import {
   clampRatio,
   matchesQuery,
   groupBySource,
+  groupByDay,
   makeWorkspace,
   readWorkspaces,
   uniqueName,
@@ -656,4 +657,24 @@ describe('groupBySource', () => {
   it('handles an empty list', () => {
     assert.deepEqual(groupBySource([]), { sessions: [], platforms: [], cron: [] })
   })
+})
+
+describe('groupByDay', () => {
+  const now = new Date(2026, 10, 9, 15, 0).getTime() // Mon Nov 9 2026, 3 PM
+  const at = (m, d, h = 12) => new Date(2026, m, d, h).getTime() / 1000
+  const row = (id, t) => ({ id, last_active: t })
+  it('buckets like core: today, yesterday, last week, month', () => {
+    const rows = [row('a', at(10, 9, 9)), row('b', at(10, 8, 20)), row('c', at(10, 2)), row('d', at(9, 12)), row('e', at(9, 3))]
+    const g = groupByDay(rows, now, 1)
+    assert.deepEqual(g.map(x => [x.label, x.rows.map(r => r.id)]), [
+      ['Today', ['a']],
+      ['Yesterday', ['b']],
+      ['Last week', ['c']],
+      ['October', ['d', 'e']]
+    ])
+  })
+  it('keeps a 1 AM chat with the evening before', () => {
+    assert.equal(groupByDay([row('x', at(10, 9, 1))], now, 1)[0].label, 'Yesterday')
+  })
+  it('handles empty input', () => assert.deepEqual(groupByDay([]), []))
 })

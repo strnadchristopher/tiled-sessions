@@ -1568,7 +1568,20 @@ function makePane(ctl) {
             })
           : null,
         bySource.sessions.length
-          ? jsx(Section, { label: 'Sessions', children: bySource.sessions.map(r => sessionRow('s', rowId(r), r)) })
+          ? jsx(Section, {
+              label: 'Sessions',
+              children: groupByDay(bySource.sessions).flatMap(g => [
+                jsx(
+                  'div',
+                  {
+                    className: 'flex h-5 items-center pl-2.5 pt-1 text-[0.625rem] font-medium text-(--ui-text-quaternary)',
+                    children: g.label
+                  },
+                  `day:${g.key}`
+                ),
+                ...g.rows.map(r => sessionRow('s', rowId(r), r))
+              ])
+            })
           : null,
         ...bySource.platforms.map(g =>
           jsx(
