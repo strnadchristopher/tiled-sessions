@@ -284,7 +284,7 @@ function createController(ctx) {
     if (added.length === 1 && Date.now() - newTileAt < 8000) {
       newTileAt = 0
       const id = storedIdOfPane(added[0].pane, layout().mainStoredSessionId)
-      if (id) ctx.setTimeout(() => host.composer?.focus?.(id), 80)
+      if (id) ctx.setTimeout(() => focusComposer(id), 80)
     }
     // Opening or closing a tile ends fullscreen and brings the layout back.
     if ($fullscreen.get()) retile({ force: true })
@@ -295,7 +295,7 @@ function createController(ctx) {
     if (closed) {
       ctx.setTimeout(() => {
         const id = host.state.focusedStoredSessionId.get()
-        if (id) host.composer?.focus?.(id)
+        if (id) focusComposer(id)
       }, 60)
     }
   }
@@ -312,12 +312,31 @@ function createController(ctx) {
     if (fs && g && g !== fs && canArrange()) arrangeFullscreen(g)
   }
 
+  /** Focus a session's composer with the caret after any draft. Core's focus
+   *  lands at the start of a non-empty contenteditable; once it settles, move
+   *  the caret to the end (unless the user has already selected a range). */
+  function focusComposer(id) {
+    host.composer?.focus?.(id)
+    const toEnd = () => {
+      const el = document.activeElement
+      if (!(el instanceof HTMLElement) || el.dataset.slot !== 'composer-rich-input') return
+      const sel = window.getSelection()
+      if (!sel || !el.contains(sel.anchorNode) || !sel.isCollapsed) return
+      const r = document.createRange()
+      r.selectNodeContents(el)
+      r.collapse(false)
+      sel.removeAllRanges()
+      sel.addRange(r)
+    }
+    for (const ms of [30, 120, 300]) ctx.setTimeout(toEnd, ms)
+  }
+
   /** Focus an on-screen session the way a tiling WM does: front its tile AND
    *  move the keyboard into its composer, so typing, ⌘W and the readouts all
    *  agree on which tile is "the" tile. */
   async function focusTile(storedId) {
     await host.openSession(storedId, { intent: 'tab' })
-    host.composer?.focus?.(storedId)
+    focusComposer(storedId)
   }
 
   async function open(storedId, { replace = false } = {}) {
