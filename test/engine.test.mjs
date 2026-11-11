@@ -3,6 +3,8 @@ import { describe, it } from 'node:test'
 
 import {
   arrangement,
+  fittedArrangement,
+  fitsArea,
   transpose,
   groupIdOfPane,
   specRects,
@@ -677,4 +679,44 @@ describe('groupByDay', () => {
     assert.equal(groupByDay([row('x', at(10, 9, 1))], now, 1)[0].label, 'Yesterday')
   })
   it('handles empty input', () => assert.deepEqual(groupByDay([]), []))
+})
+
+describe('fittedArrangement (tall windows)', () => {
+  const tall = { x: 0, y: 0, w: 800, h: 1800 }
+  const wide = { x: 0, y: 0, w: 2200, h: 1200 }
+  const four = ['a', 'b', 'c', 'd']
+  const widths = (spec, area) => [...specRects(spec, area).values()].map(r => Math.round(r.w))
+
+  it('keeps the asked-for layout when it fits', () => {
+    assert.deepEqual(fittedArrangement('columns', four, wide), arrangement('columns', four, wide))
+    assert.deepEqual(fittedArrangement('grid', four, wide, { flip: true }), arrangement('grid', four, wide, { flip: true }))
+  })
+
+  it('four columns in a portrait window wrap instead of slivering', () => {
+    assert.equal(fitsArea(arrangement('columns', four, tall), tall), false)
+    const spec = fittedArrangement('columns', four, tall)
+    assert.ok(fitsArea(spec, tall))
+    assert.deepEqual(widths(spec, tall), [400, 400, 400, 400])
+  })
+
+  it('a flipped grid in a portrait window falls back to the unflipped grid', () => {
+    assert.equal(fitsArea(arrangement('grid', four, tall, { flip: true }), tall), false)
+    const spec = fittedArrangement('grid', four, tall, { flip: true })
+    assert.ok(fitsArea(spec, tall))
+    assert.deepEqual(spec, arrangement('grid', four, tall))
+  })
+
+  it('flipped master/dwindle in portrait still give usable tiles', () => {
+    for (const layout of ['master', 'dwindle']) {
+      const spec = fittedArrangement(layout, four, tall, { flip: true })
+      assert.ok(fitsArea(spec, tall), layout)
+    }
+  })
+
+  it('nothing fits: the least squeezed candidate, never the sliver row', () => {
+    const narrow = { x: 0, y: 0, w: 500, h: 600 }
+    const eight = 'abcdefgh'.split('')
+    const spec = fittedArrangement('columns', eight, narrow)
+    assert.ok(Math.min(...widths(spec, narrow)) >= 320)
+  })
 })

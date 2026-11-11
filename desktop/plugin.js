@@ -408,6 +408,58 @@ function arrangement(layout, panes, area, { masterRatio = 0.55, flip = false } =
   return column(lines.filter(l => l))
 }
 
+/** Smallest tile a chat can use: core gives a session tile `minWidth: 20rem`,
+ *  and below ~10rem of height the composer covers the whole thread. */
+const MIN_TILE = { w: 320, h: 160 }
+
+/** True when every tile of `spec` in `area` is at least `min` in both axes. */
+function fitsArea(spec, area, min = MIN_TILE) {
+  for (const r of specRects(spec, area).values()) if (r.w < min.w - 0.5 || r.h < min.h - 0.5) return false
+  return true
+}
+
+/** Columns that wrap: as many side by side as fit at `min.w`, then a new row. */
+function wrappedColumns(panes, area, min) {
+  const cols = Math.max(1, Math.min(panes.length, Math.floor(area.w / min.w)))
+  const lines = []
+  for (let i = 0; i < panes.length; i += cols) lines.push(row(panes.slice(i, i + cols).map(leafOf)))
+  return column(lines)
+}
+
+/** How badly `spec` undershoots `min`, width first: core enforces a tile's
+ *  min width (a short row overflows the window), height only crowds the
+ *  thread. Compare as [width, height] shortfalls; 0 = fits that axis. */
+function squeeze(spec, area, min) {
+  let w = 0
+  let h = 0
+  for (const r of specRects(spec, area).values()) {
+    w = Math.max(w, 1 - r.w / min.w)
+    h = Math.max(h, 1 - r.h / min.h)
+  }
+  return [w, h]
+}
+const lessSqueezed = (a, b) => a[0] < b[0] - 1e-9 || (Math.abs(a[0] - b[0]) <= 1e-9 && a[1] < b[1] - 1e-9)
+
+/**
+ * `arrangement`, but never with tiles narrower or shorter than `min`. A tall
+ * window turns a flipped grid or four columns into slivers that core can't
+ * shrink further (each tile has a min width), so the row overflows and the
+ * sidebar can't be dragged wider. When the asked-for layout doesn't fit, try
+ * in order: the same layout unflipped, columns that wrap into rows, and an
+ * aspect-fitted grid; take the first that fits, else the least squeezed.
+ */
+function fittedArrangement(layout, panes, area, { min = MIN_TILE, ...opts } = {}) {
+  const want = arrangement(layout, panes, area, opts)
+  if (!want || panes.length < 2 || fitsArea(want, area, min)) return want
+  const candidates = [want]
+  if (opts.flip) candidates.push(arrangement(layout, panes, area, { ...opts, flip: false }))
+  if (layout === 'columns' || layout === 'grid') candidates.push(wrappedColumns(panes, area, min))
+  candidates.push(arrangement('grid', panes, area, { masterRatio: opts.masterRatio }))
+  const fit = candidates.find(c => fitsArea(c, area, min))
+  if (fit) return fit
+  return candidates.reduce((best, c) => (lessSqueezed(squeeze(c, area, min), squeeze(best, area, min)) ? c : best))
+}
+
 /** `spec` with every split's orientation turned (row ↔ column); weights kept. */
 function transpose(spec) {
   if (!spec || !spec.children) return spec
@@ -792,6 +844,7 @@ const DEFAULTS = {
   max_tiles: 8,
   click: 'new-tile',
   plus_new_tile: true,
+  new_key_tile: true,
   replace_modifier: 'alt',
   hint_dismissed: false,
   flipped: false
@@ -804,6 +857,10 @@ const LAYOUT_INFO = {
 }
 const LIST_KEY = [ID, 'session.list']
 const SIDEBAR_ESTIMATE = 280
+// The sidebar's real width, measured from the layout switcher (which spans
+// it) whenever the Tiles pane is on screen; the estimate covers the rest.
+let sidebarSeen = 0
+const SWITCHER_INSET = 24
 // Core keeps the user's keybind overrides here (only the diff from defaults).
 // No SDK reader exists for live bindings, so the shortcuts card reads it and
 // falls back to our shipped defaults when it is absent or unreadable.
@@ -813,6 +870,7 @@ const hasTiling = () => Boolean(host.state?.sessionLayout && typeof host.layout?
 /** Layouts need `host.layout.arrangeSessions` (same upstream PR, later revision). */
 /** Newer layout SDK: plugins may take over a chat strip's "+". */
 const canRedirectPlus = () => hasTiling() && typeof host.layout?.redirectNewSessionTab === 'function'
+const canRedirectNew = () => hasTiling() && typeof host.layout?.redirectNewSession === 'function' && typeof host.layout?.newChatTile === 'function'
 const canArrange = () => hasTiling() && typeof host.layout?.arrangeSessions === 'function'
 const canPin = () => typeof host.sessions?.pin === 'function'
 /** Rename goes through the gateway's session.title RPC, which needs the
@@ -926,7 +984,7 @@ function createController(ctx) {
   function engineView() {
     const l = layout()
     const vp = host.state.viewport.get()
-    return { l, tree: fromCore(l?.root ?? null, isSessionPane), area: { x: 0, y: 0, w: Math.max(320, (vp.width || 1600) - SIDEBAR_ESTIMATE), h: vp.height || 900 } }
+    return { l, tree: fromCore(l?.root ?? null, isSessionPane), area: { x: 0, y: 0, w: Math.max(320, (vp.width || 1600) - Math.max(SIDEBAR_ESTIMATE, sidebarSeen)), h: vp.height || 900 } }
   }
 
   const opts = () => ({ history: $history.get(), isCandidate: isSessionPane })
@@ -953,7 +1011,7 @@ function createController(ctx) {
     if (zones.length < 2) return true
     const s = $settings.get()
     const paneOfGroup = new Map(zones.map(z => [z.groupId, z.pane]))
-    const spec = arrangement(s.layout, order.map(g => paneOfGroup.get(g)), engineView().area, { masterRatio: s.master_ratio, flip: Boolean(s.flipped) })
+    const spec = fittedArrangement(s.layout, order.map(g => paneOfGroup.get(g)), engineView().area, { masterRatio: s.master_ratio, flip: Boolean(s.flipped) })
     const ok = host.layout.arrangeSessions(spec)
     if (!ok && !warned) {
       warned = true
@@ -1155,6 +1213,15 @@ function createController(ctx) {
   function onStripPlus(pane) {
     if (!$settings.get().plus_new_tile) return false
     newTile(pane)
+    return true
+  }
+
+  /** ⌘N / Ctrl+N (`host.layout.redirectNewSession`): with new_key_tile on, the
+   *  new session opens as a tile beside the focused chat instead of replacing
+   *  it. False lets core start its stock fresh session in place. */
+  function onNewSessionKey() {
+    if (!$settings.get().new_key_tile || typeof host.layout?.newChatTile !== 'function') return false
+    newTile()
     return true
   }
 
@@ -1415,6 +1482,7 @@ function createController(ctx) {
 
   return {
     onStripPlus,
+    onNewSessionKey,
     retileAll: () => retile({ force: true }),
     $settings,
     $openedHere,
@@ -1670,7 +1738,7 @@ function NewSessionRow({ ctl }) {
   return jsxs('button', {
     type: 'button',
     className:
-      'mb-2 flex h-7 w-full items-center gap-2 rounded-md pl-2.5 pr-1 text-left text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+      'mb-2 flex h-8 w-full items-center gap-2 rounded-md pl-2.5 pr-1 text-left text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
     onClick: run,
     children: [jsx(Codicon, { name: 'add', className: 'text-[0.875rem]' }), jsx('span', { className: 'min-w-0 flex-1 truncate', children: 'New session' })]
   })
@@ -1798,6 +1866,9 @@ function LayoutSwitcher({ ctl }) {
   const fullscreen = useValue(ctl.$fullscreen)
   const flipCombo = useFirstCombo('flip')
   const [ref, width] = useWidth()
+  useEffect(() => {
+    if (width) sidebarSeen = width + SWITCHER_INSET
+  }, [width])
   const offered = enabledLayouts(s.layouts_enabled)
   const flipped = Boolean(s.flipped)
   const radios = offered.length >= 2 ? offered : []
@@ -2538,6 +2609,14 @@ function makeSettings(ctl, ctx) {
           onChange: on => ctl.setSettings({ plus_new_tile: on })
         }),
         jsx(ToggleRow, {
+          label: 'New-session shortcut opens a new tile',
+          description: canRedirectNew()
+            ? 'The new-session shortcut (Ctrl+N / \u2318N) opens the chat as its own tile. Off: it replaces the focused chat, like stock Hermes.'
+            : `Needs ${NEEDS} with redirectNewSession.`,
+          checked: s.new_key_tile && canRedirectNew(),
+          onChange: on => ctl.setSettings({ new_key_tile: on })
+        }),
+        jsx(ToggleRow, {
           label: 'Click opens a new tile',
           description: 'Off: a click replaces the focused chat, like stock Hermes.',
           checked: s.click === 'new-tile',
@@ -2619,6 +2698,7 @@ export default {
       ctx.onDispose(host.state.sessionLayout.listen(() => queueMicrotask(() => ctl.onLayout())))
     }
     if (canRedirectPlus()) ctx.onDispose(host.layout.redirectNewSessionTab(ctl.onStripPlus))
+    if (canRedirectNew()) ctx.onDispose(host.layout.redirectNewSession(ctl.onNewSessionKey))
     const invalidate = () => void queryClient.invalidateQueries({ queryKey: LIST_KEY })
     ctx.onEvent('sessions.changed', invalidate)
     ctx.onEvent('session.title', invalidate)

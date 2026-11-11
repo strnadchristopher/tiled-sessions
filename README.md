@@ -30,11 +30,12 @@ hermes plugins install tiled-sessions
   | **Columns** | Side by side, equal widths. Made for ultrawides. |
 
 - **Flip orientation.** `Ctrl+Alt+/` (or the ⇅ button beside the layouts) turns the whole layout, like Hyprland's `togglesplit`: Columns become rows, Master puts the big tile on top, a 3×2 grid becomes 2×3. It sticks across layouts until you press it again.
+- **Tiles never get too thin.** No tile is laid out narrower than a chat can be (core's 20rem) or too short to show its thread. In a portrait window, Columns wrap into rows and a flipped layout falls back to its unflipped shape, so the sidebar keeps its width and stays resizable.
 
 - **Fullscreen.** `Ctrl+Alt+F` fills the chat area with the focused tile; the others fold into a slim strip along the bottom, so a click (or `Ctrl+Alt+↓`) still reaches them and fullscreen follows. Press it again, open or close a tile, or click the status chip to bring the layout back.
 - **Auto-tiling.** Whenever a tile opens or closes (by click, `Ctrl+W`, a tab's ✕ or a shortcut), every tile is laid out again. Dragging a sash to resize is left alone until the next open or close, except the Master divider, which is remembered. `Ctrl+Alt+R` re-tiles on demand and drops hand-dragged sizes, including a remembered Master size (back to the preset picked in settings). You can turn auto-tiling off and place tiles yourself.
 - **Saved workspaces.** The save button on the *Open* list (or `Ctrl+Alt+S`) keeps the open tiles and the layout under a name. Click it in the *Workspaces* list, pick it with `Ctrl+Alt+O`, or run *Tiles: Restore …* from the palette, and those sessions come back as tiles in that order. Sessions deleted since are skipped. Right-click a workspace to rename, update or delete it; they're also listed in settings.
-- **New chat in a new tile.** `Ctrl+Alt+Enter` starts a fresh chat in its own tile and focuses it, the way a tiling WM opens a terminal. The **+** after a chat's tabs does the same, opening the new tile beside that chat instead of stacking another tab. Turn the setting off and the + stacks a tab as usual.
+- **New chat in a new tile.** `Ctrl+Alt+Enter` starts a fresh chat in its own tile and focuses it, the way a tiling WM opens a terminal. The **+** after a chat's tabs does the same, opening the new tile beside that chat instead of stacking another tab, and so does Hermes' new-session shortcut (`Ctrl+N` / `⌘N`) instead of replacing the focused chat. Turn either setting off for the stock behaviour.
 - **The keyboard follows focus.** Moving focus moves the caret too, so typing and `Ctrl+W` land in the focused tile. (Hermes' `Ctrl+W` acts on the tile under the pointer first, when the pointer is over one.)
 - **A Tiles pane** in the sidebar: a layout switcher (labels give way to icons, and then wrap, when the sidebar is narrow), a shortcuts card on first run (your actual bindings; close it and *Tiles: Show shortcuts* brings it back), search, then *Pinned*, *Open* (tiles in on-screen order, focused one highlighted, drag a row to move its tile), *Workspaces*, then the same source sections as the core sidebar: *Sessions* (local chats), one collapsible section per messaging platform (*Telegram*, *Discord*, …; newest first, three rows then *Show more*), and *Cron jobs*. Search opens every section.
   - **Search** filters every list by title and opening message as you type. `Escape` clears it.
@@ -73,6 +74,7 @@ hermes plugins install tiled-sessions
 | Auto-tile | Re-tile whenever a tile opens or closes. |
 | Split target | With auto-tile off: split the largest or the focused tile. |
 | Tab-strip + opens a new tile | On by default. The + after a chat's tabs opens a new session as its own tile. Off: it stacks a new tab, like stock Hermes. |
+| New-session shortcut opens a new tile | On by default. `Ctrl+N` / `⌘N` opens the new session as its own tile. Off: it replaces the focused chat, like stock Hermes. |
 | Click opens a new tile | Off: a click replaces the focused chat, like stock Hermes. |
 | Replace-in-place modifier | `Alt` or `Shift` + click opens in place. |
 | Max tiles | 4, 6, 8 or 12; past it, a click opens in place. |

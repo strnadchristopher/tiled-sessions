@@ -43,6 +43,7 @@ const DEFAULTS = {
   max_tiles: 8,
   click: 'new-tile',
   plus_new_tile: true,
+  new_key_tile: true,
   replace_modifier: 'alt',
   hint_dismissed: false,
   flipped: false
@@ -55,6 +56,10 @@ const LAYOUT_INFO = {
 }
 const LIST_KEY = [ID, 'session.list']
 const SIDEBAR_ESTIMATE = 280
+// The sidebar's real width, measured from the layout switcher (which spans
+// it) whenever the Tiles pane is on screen; the estimate covers the rest.
+let sidebarSeen = 0
+const SWITCHER_INSET = 24
 // Core keeps the user's keybind overrides here (only the diff from defaults).
 // No SDK reader exists for live bindings, so the shortcuts card reads it and
 // falls back to our shipped defaults when it is absent or unreadable.
@@ -64,6 +69,7 @@ const hasTiling = () => Boolean(host.state?.sessionLayout && typeof host.layout?
 /** Layouts need `host.layout.arrangeSessions` (same upstream PR, later revision). */
 /** Newer layout SDK: plugins may take over a chat strip's "+". */
 const canRedirectPlus = () => hasTiling() && typeof host.layout?.redirectNewSessionTab === 'function'
+const canRedirectNew = () => hasTiling() && typeof host.layout?.redirectNewSession === 'function' && typeof host.layout?.newChatTile === 'function'
 const canArrange = () => hasTiling() && typeof host.layout?.arrangeSessions === 'function'
 const canPin = () => typeof host.sessions?.pin === 'function'
 /** Rename goes through the gateway's session.title RPC, which needs the
@@ -177,7 +183,7 @@ function createController(ctx) {
   function engineView() {
     const l = layout()
     const vp = host.state.viewport.get()
-    return { l, tree: fromCore(l?.root ?? null, isSessionPane), area: { x: 0, y: 0, w: Math.max(320, (vp.width || 1600) - SIDEBAR_ESTIMATE), h: vp.height || 900 } }
+    return { l, tree: fromCore(l?.root ?? null, isSessionPane), area: { x: 0, y: 0, w: Math.max(320, (vp.width || 1600) - Math.max(SIDEBAR_ESTIMATE, sidebarSeen)), h: vp.height || 900 } }
   }
 
   const opts = () => ({ history: $history.get(), isCandidate: isSessionPane })
@@ -204,7 +210,7 @@ function createController(ctx) {
     if (zones.length < 2) return true
     const s = $settings.get()
     const paneOfGroup = new Map(zones.map(z => [z.groupId, z.pane]))
-    const spec = arrangement(s.layout, order.map(g => paneOfGroup.get(g)), engineView().area, { masterRatio: s.master_ratio, flip: Boolean(s.flipped) })
+    const spec = fittedArrangement(s.layout, order.map(g => paneOfGroup.get(g)), engineView().area, { masterRatio: s.master_ratio, flip: Boolean(s.flipped) })
     const ok = host.layout.arrangeSessions(spec)
     if (!ok && !warned) {
       warned = true
@@ -406,6 +412,15 @@ function createController(ctx) {
   function onStripPlus(pane) {
     if (!$settings.get().plus_new_tile) return false
     newTile(pane)
+    return true
+  }
+
+  /** ⌘N / Ctrl+N (`host.layout.redirectNewSession`): with new_key_tile on, the
+   *  new session opens as a tile beside the focused chat instead of replacing
+   *  it. False lets core start its stock fresh session in place. */
+  function onNewSessionKey() {
+    if (!$settings.get().new_key_tile || typeof host.layout?.newChatTile !== 'function') return false
+    newTile()
     return true
   }
 
@@ -666,6 +681,7 @@ function createController(ctx) {
 
   return {
     onStripPlus,
+    onNewSessionKey,
     retileAll: () => retile({ force: true }),
     $settings,
     $openedHere,
@@ -921,7 +937,7 @@ function NewSessionRow({ ctl }) {
   return jsxs('button', {
     type: 'button',
     className:
-      'mb-2 flex h-7 w-full items-center gap-2 rounded-md pl-2.5 pr-1 text-left text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+      'mb-2 flex h-8 w-full items-center gap-2 rounded-md pl-2.5 pr-1 text-left text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
     onClick: run,
     children: [jsx(Codicon, { name: 'add', className: 'text-[0.875rem]' }), jsx('span', { className: 'min-w-0 flex-1 truncate', children: 'New session' })]
   })
@@ -1049,6 +1065,9 @@ function LayoutSwitcher({ ctl }) {
   const fullscreen = useValue(ctl.$fullscreen)
   const flipCombo = useFirstCombo('flip')
   const [ref, width] = useWidth()
+  useEffect(() => {
+    if (width) sidebarSeen = width + SWITCHER_INSET
+  }, [width])
   const offered = enabledLayouts(s.layouts_enabled)
   const flipped = Boolean(s.flipped)
   const radios = offered.length >= 2 ? offered : []
@@ -1789,6 +1808,14 @@ function makeSettings(ctl, ctx) {
           onChange: on => ctl.setSettings({ plus_new_tile: on })
         }),
         jsx(ToggleRow, {
+          label: 'New-session shortcut opens a new tile',
+          description: canRedirectNew()
+            ? 'The new-session shortcut (Ctrl+N / \u2318N) opens the chat as its own tile. Off: it replaces the focused chat, like stock Hermes.'
+            : `Needs ${NEEDS} with redirectNewSession.`,
+          checked: s.new_key_tile && canRedirectNew(),
+          onChange: on => ctl.setSettings({ new_key_tile: on })
+        }),
+        jsx(ToggleRow, {
           label: 'Click opens a new tile',
           description: 'Off: a click replaces the focused chat, like stock Hermes.',
           checked: s.click === 'new-tile',
@@ -1870,6 +1897,7 @@ export default {
       ctx.onDispose(host.state.sessionLayout.listen(() => queueMicrotask(() => ctl.onLayout())))
     }
     if (canRedirectPlus()) ctx.onDispose(host.layout.redirectNewSessionTab(ctl.onStripPlus))
+    if (canRedirectNew()) ctx.onDispose(host.layout.redirectNewSession(ctl.onNewSessionKey))
     const invalidate = () => void queryClient.invalidateQueries({ queryKey: LIST_KEY })
     ctx.onEvent('sessions.changed', invalidate)
     ctx.onEvent('session.title', invalidate)

@@ -379,6 +379,58 @@ export function arrangement(layout, panes, area, { masterRatio = 0.55, flip = fa
   return column(lines.filter(l => l))
 }
 
+/** Smallest tile a chat can use: core gives a session tile `minWidth: 20rem`,
+ *  and below ~10rem of height the composer covers the whole thread. */
+export const MIN_TILE = { w: 320, h: 160 }
+
+/** True when every tile of `spec` in `area` is at least `min` in both axes. */
+export function fitsArea(spec, area, min = MIN_TILE) {
+  for (const r of specRects(spec, area).values()) if (r.w < min.w - 0.5 || r.h < min.h - 0.5) return false
+  return true
+}
+
+/** Columns that wrap: as many side by side as fit at `min.w`, then a new row. */
+function wrappedColumns(panes, area, min) {
+  const cols = Math.max(1, Math.min(panes.length, Math.floor(area.w / min.w)))
+  const lines = []
+  for (let i = 0; i < panes.length; i += cols) lines.push(row(panes.slice(i, i + cols).map(leafOf)))
+  return column(lines)
+}
+
+/** How badly `spec` undershoots `min`, width first: core enforces a tile's
+ *  min width (a short row overflows the window), height only crowds the
+ *  thread. Compare as [width, height] shortfalls; 0 = fits that axis. */
+function squeeze(spec, area, min) {
+  let w = 0
+  let h = 0
+  for (const r of specRects(spec, area).values()) {
+    w = Math.max(w, 1 - r.w / min.w)
+    h = Math.max(h, 1 - r.h / min.h)
+  }
+  return [w, h]
+}
+const lessSqueezed = (a, b) => a[0] < b[0] - 1e-9 || (Math.abs(a[0] - b[0]) <= 1e-9 && a[1] < b[1] - 1e-9)
+
+/**
+ * `arrangement`, but never with tiles narrower or shorter than `min`. A tall
+ * window turns a flipped grid or four columns into slivers that core can't
+ * shrink further (each tile has a min width), so the row overflows and the
+ * sidebar can't be dragged wider. When the asked-for layout doesn't fit, try
+ * in order: the same layout unflipped, columns that wrap into rows, and an
+ * aspect-fitted grid; take the first that fits, else the least squeezed.
+ */
+export function fittedArrangement(layout, panes, area, { min = MIN_TILE, ...opts } = {}) {
+  const want = arrangement(layout, panes, area, opts)
+  if (!want || panes.length < 2 || fitsArea(want, area, min)) return want
+  const candidates = [want]
+  if (opts.flip) candidates.push(arrangement(layout, panes, area, { ...opts, flip: false }))
+  if (layout === 'columns' || layout === 'grid') candidates.push(wrappedColumns(panes, area, min))
+  candidates.push(arrangement('grid', panes, area, { masterRatio: opts.masterRatio }))
+  const fit = candidates.find(c => fitsArea(c, area, min))
+  if (fit) return fit
+  return candidates.reduce((best, c) => (lessSqueezed(squeeze(c, area, min), squeeze(best, area, min)) ? c : best))
+}
+
 /** `spec` with every split's orientation turned (row ↔ column); weights kept. */
 export function transpose(spec) {
   if (!spec || !spec.children) return spec
