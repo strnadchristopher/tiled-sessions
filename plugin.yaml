@@ -2,7 +2,7 @@
 # desktop/plugin.js (generated from src/ by scripts/build.mjs).
 name: tiled-sessions
 title: Tiled Sessions
-version: "0.5.1"
+version: "0.5.2"
 license: MIT
 description: >-
   Hyprland for Hermes Desktop. Clicking a session opens it in a new tile and

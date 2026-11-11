@@ -312,23 +312,11 @@ function createController(ctx) {
     if (fs && g && g !== fs && canArrange()) arrangeFullscreen(g)
   }
 
-  /** Focus a session's composer with the caret after any draft. Core's focus
-   *  lands at the start of a non-empty contenteditable; once it settles, move
-   *  the caret to the end (unless the user has already selected a range). */
+  /** Focus a session's composer with the caret after any draft. The SDK verb
+   *  owns caret placement (`caret: 'end'`); Desktops without that option
+   *  ignore it and focus as before. */
   function focusComposer(id) {
-    host.composer?.focus?.(id)
-    const toEnd = () => {
-      const el = document.activeElement
-      if (!(el instanceof HTMLElement) || el.dataset.slot !== 'composer-rich-input') return
-      const sel = window.getSelection()
-      if (!sel || !el.contains(sel.anchorNode) || !sel.isCollapsed) return
-      const r = document.createRange()
-      r.selectNodeContents(el)
-      r.collapse(false)
-      sel.removeAllRanges()
-      sel.addRange(r)
-    }
-    for (const ms of [30, 120, 300]) ctx.setTimeout(toEnd, ms)
+    host.composer?.focus?.(id, { caret: 'end' })
   }
 
   /** Focus an on-screen session the way a tiling WM does: front its tile AND
