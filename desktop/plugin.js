@@ -305,7 +305,7 @@ function mergeSessionRows(live = [], stored = []) {
   for (const row of [...stored, ...live]) {
     if (!row?.id) continue
     const prev = byId.get(row.id)
-    byId.set(row.id, prev ? { ...prev, ...row, title: row.title || prev.title } : row)
+    byId.set(row.id, prev ? { ...prev, ...row, title: row.title || prev.title, source: sourceOf(row) ? row.source : prev.source } : row)
   }
   return [...byId.values()]
     .filter(r => (r.message_count ?? 1) > 0 || r.title)
@@ -611,6 +611,8 @@ const SOURCE_LABELS = {
 }
 
 const sourceOf = row => String(row?.source ?? '').trim().toLowerCase()
+const BACKGROUND_SOURCES = new Set(['cron', 'subagent', 'kanban', 'tool', 'oneshot'])
+const isBackgroundSource = row => BACKGROUND_SOURCES.has(sourceOf(row))
 const sourceLabel = id => SOURCE_LABELS[id] ?? id
 
 /** { sessions, platforms: [{ id, label, rows }], cron } — input order kept within each. */
@@ -621,6 +623,7 @@ function groupBySource(rows = []) {
   for (const r of rows) {
     const src = sourceOf(r)
     if (src === 'cron') cron.push(r)
+    else if (isBackgroundSource(r)) continue
     else if (MESSAGING_SET.has(src)) {
       if (!byPlatform.has(src)) byPlatform.set(src, [])
       byPlatform.get(src).push(r)
@@ -900,13 +903,31 @@ const notifyError = (err, message) =>
   typeof host.notifyError === 'function' ? host.notifyError(err, message) : host.notify({ kind: 'error', message })
 
 async function listRows() {
-  // The gateway lists running sessions (default scope) and resumable history
-  // (`scope: 'stored'`) separately; an open chat is only in the first.
-  const [live, stored] = await Promise.all([
-    host.request('session.list', { limit: 200 }).catch(() => ({ sessions: [] })),
-    host.request('session.list', { limit: 200, scope: 'stored' }).catch(() => ({ sessions: [] }))
-  ])
-  return { sessions: mergeSessionRows(live?.sessions, stored?.sessions) }
+  // Legacy Desktop session.list supports a larger limit, but no source filter
+  // or offset (tui_gateway/methods_session.py). Grow the window before applying
+  // the human-history budget. Internal-source filtering follows a 2*limit read,
+  // so even empty responses do not prove exhaustion. Probe at most five windows
+  // (200 through 3200); older chats remain best-effort.
+  // Canonical gateways cap limit at 200; retain the last successful page there.
+  const list = async params => {
+    let limit = 200
+    let rows = []
+    for (;;) {
+      let result
+      try { result = await host.request('session.list', { ...params, limit }) }
+      catch { return rows }
+      rows = result?.sessions ?? []
+      const human = rows.filter(r => !isBackgroundSource(r))
+      if (human.length >= 200 || limit >= 3200) {
+        return [...human.slice(0, 200), ...rows.filter(isBackgroundSource)]
+      }
+      limit *= 2
+    }
+  }
+  // Canonical gateways separate live and stored feeds. Legacy gateways ignore
+  // scope; merging by id also handles that without changing session identity.
+  const [live, stored] = await Promise.all([list({}), list({ scope: 'stored' })])
+  return { sessions: mergeSessionRows(live, stored) }
 }
 
 function createController(ctx) {

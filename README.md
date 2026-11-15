@@ -96,6 +96,10 @@ In Hermes Desktop: **Capabilities → Plugins**, find **Tiled Sessions** in the 
 
 For development, copy `desktop/plugin.js` and `plugin.yaml` into `~/.hermes/desktop-plugins/tiled-sessions/`; the app hot-reloads it.
 
+## 0.6.1
+
+Cron and background runs stay out of normal Sessions. On the legacy Desktop gateway, history retrieval probes limits of 200, 400, 800, 1600, and at most 3200 per feed until it finds 200 chats, even after short or empty responses caused by internal-source filtering. This finite window is best-effort: older chats can still remain beyond it; Cron jobs remains available in its existing collapsed section. Canonical gateways currently cap each feed at 200 and expose no pagination or source filters, so older chats beyond that window require an upstream gateway change.
+
 ## Develop
 
 ```sh
