@@ -305,7 +305,7 @@ function mergeSessionRows(live = [], stored = []) {
   for (const row of [...stored, ...live]) {
     if (!row?.id) continue
     const prev = byId.get(row.id)
-    byId.set(row.id, prev ? { ...prev, ...row, title: row.title || prev.title } : row)
+    byId.set(row.id, prev ? { ...prev, ...row, title: row.title || prev.title, source: sourceOf(row) ? row.source : prev.source } : row)
   }
   return [...byId.values()]
     .filter(r => (r.message_count ?? 1) > 0 || r.title)
@@ -530,6 +530,51 @@ function matchesQuery(row, query) {
 }
 
 // ---------------------------------------------------------------------------
+// Source sections — mirrors core's sidebar (lib/session-source.ts): local
+// sessions form "Sessions", each messaging platform gets its own section
+// (newest platform first), cron runs sit in their own section.
+// ---------------------------------------------------------------------------
+
+const MESSAGING_SOURCES = [
+  'telegram', 'discord', 'slack', 'mattermost', 'matrix', 'signal', 'whatsapp', 'bluebubbles', 'photon',
+  'homeassistant', 'email', 'sms', 'webhook', 'api_server', 'weixin', 'wecom', 'qqbot', 'yuanbao', 'dingtalk', 'feishu'
+]
+const MESSAGING_SET = new Set(MESSAGING_SOURCES)
+
+const SOURCE_LABELS = {
+  api_server: 'API', bluebubbles: 'iMessage', dingtalk: 'DingTalk', discord: 'Discord', email: 'Email',
+  feishu: 'Feishu', homeassistant: 'Home Assistant', matrix: 'Matrix', mattermost: 'Mattermost', photon: 'Photon',
+  qqbot: 'QQ', signal: 'Signal', slack: 'Slack', sms: 'SMS', telegram: 'Telegram', webhook: 'Webhook',
+  wecom: 'WeCom', weixin: 'WeChat', whatsapp: 'WhatsApp', yuanbao: 'Yuanbao'
+}
+
+const sourceOf = row => String(row?.source ?? '').trim().toLowerCase()
+const BACKGROUND_SOURCES = new Set(['cron', 'subagent', 'kanban', 'tool', 'oneshot'])
+const isBackgroundSource = row => BACKGROUND_SOURCES.has(sourceOf(row))
+const sourceLabel = id => SOURCE_LABELS[id] ?? id
+
+/** { sessions, platforms: [{ id, label, rows }], cron } — input order kept within each. */
+function groupBySource(rows = []) {
+  const sessions = []
+  const cron = []
+  const byPlatform = new Map()
+  for (const r of rows) {
+    const src = sourceOf(r)
+    if (src === 'cron') cron.push(r)
+    else if (isBackgroundSource(r)) continue
+    else if (MESSAGING_SET.has(src)) {
+      if (!byPlatform.has(src)) byPlatform.set(src, [])
+      byPlatform.get(src).push(r)
+    } else sessions.push(r)
+  }
+  const newest = list => Math.max(...list.map(r => r.last_active ?? r.updated_at ?? r.started_at ?? 0))
+  const platforms = [...byPlatform.entries()]
+    .map(([id, list]) => ({ id, label: sourceLabel(id), rows: list }))
+    .sort((a, b) => newest(b.rows) - newest(a.rows))
+  return { sessions, platforms, cron }
+}
+
+// ---------------------------------------------------------------------------
 // Saved workspaces
 // ---------------------------------------------------------------------------
 
@@ -741,13 +786,31 @@ const notifyError = (err, message) =>
   typeof host.notifyError === 'function' ? host.notifyError(err, message) : host.notify({ kind: 'error', message })
 
 async function listRows() {
-  // The gateway lists running sessions (default scope) and resumable history
-  // (`scope: 'stored'`) separately; an open chat is only in the first.
-  const [live, stored] = await Promise.all([
-    host.request('session.list', { limit: 200 }).catch(() => ({ sessions: [] })),
-    host.request('session.list', { limit: 200, scope: 'stored' }).catch(() => ({ sessions: [] }))
-  ])
-  return { sessions: mergeSessionRows(live?.sessions, stored?.sessions) }
+  // Legacy Desktop session.list supports a larger limit, but no source filter
+  // or offset (tui_gateway/methods_session.py). Grow the window before applying
+  // the human-history budget. Internal-source filtering follows a 2*limit read,
+  // so even empty responses do not prove exhaustion. Probe at most five windows
+  // (200 through 3200); older chats remain best-effort.
+  // Canonical gateways cap limit at 200; retain the last successful page there.
+  const list = async params => {
+    let limit = 200
+    let rows = []
+    for (;;) {
+      let result
+      try { result = await host.request('session.list', { ...params, limit }) }
+      catch { return rows }
+      rows = result?.sessions ?? []
+      const human = rows.filter(r => !isBackgroundSource(r))
+      if (human.length >= 200 || limit >= 3200) {
+        return [...human.slice(0, 200), ...rows.filter(isBackgroundSource)]
+      }
+      limit *= 2
+    }
+  }
+  // Canonical gateways separate live and stored feeds. Legacy gateways ignore
+  // scope; merging by id also handles that without changing session identity.
+  const [live, stored] = await Promise.all([list({}), list({ scope: 'stored' })])
+  return { sessions: mergeSessionRows(live, stored) }
 }
 
 function createController(ctx) {
@@ -764,6 +827,14 @@ function createController(ctx) {
   const $workspaces = atom(readWorkspaces(ctx.storage.get('workspaces', [])))
   // Group id of the zone shown fullscreen, or null.
   const $fullscreen = atom(ctx.storage.get('fullscreen', null) || null)
+  // Source sections the user expanded (platforms + cron collapse by default, like core).
+  const $openSections = atom(ctx.storage.get('open_sections', []) || [])
+  const toggleSection = id => {
+    const cur = $openSections.get()
+    const next = cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]
+    $openSections.set(next)
+    ctx.storage.set('open_sections', next)
+  }
   // The workspace picker (palette / keybind) is open.
   const $picker = atom(false)
   // A workspace just saved by keybind, for the pane to open in rename. Panes mounted: tilesPanes.
@@ -1304,6 +1375,8 @@ function createController(ctx) {
     $order,
     $workspaces,
     $fullscreen,
+    $openSections,
+    toggleSection,
     $picker,
     $renameWs,
     paneMounted: () => {
@@ -1553,6 +1626,49 @@ function NewSessionRow({ ctl }) {
       'mb-2 flex h-7 w-full items-center gap-2 rounded-md pl-2.5 pr-1 text-left text-[0.8125rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
     onClick: run,
     children: [jsx(Codicon, { name: 'add', className: 'text-[0.875rem]' }), jsx('span', { className: 'min-w-0 flex-1 truncate', children: 'New session' })]
+  })
+}
+
+// Core shows 3 rows of a collapsed-by-default platform section, then 10 more per click.
+const SOURCE_INITIAL_ROWS = 3
+const SOURCE_LOAD_STEP = 10
+
+/** A platform / cron section: header toggles open, rows reveal in steps. */
+function SourceSection({ ctl, id, label, rows, forceOpen, renderRow }) {
+  const openIds = useValue(ctl.$openSections)
+  const [shown, setShown] = useState(SOURCE_INITIAL_ROWS)
+  const open = forceOpen || openIds.includes(id)
+  const visible = forceOpen ? rows : rows.slice(0, shown)
+  return jsxs('section', {
+    className: 'flex flex-col gap-px pb-3',
+    children: [
+      jsxs('button', {
+        type: 'button',
+        'aria-expanded': open,
+        onClick: () => ctl.toggleSection(id),
+        className:
+          'flex h-6 w-full items-center gap-1.5 rounded-md pl-2.5 pr-1 text-left text-[0.6875rem] font-medium uppercase text-(--ui-text-quaternary) transition-colors hover:text-(--ui-text-secondary)',
+        style: { letterSpacing: '0.06em' },
+        children: [
+          jsx('span', { className: 'min-w-0 truncate', children: label }),
+          jsx('span', { className: 'tabular-nums', children: rows.length }),
+          jsx(Codicon, { name: open ? 'chevron-down' : 'chevron-right', className: 'ml-auto text-[0.75rem]' })
+        ]
+      }),
+      ...(open ? visible.map(renderRow) : []),
+      open && !forceOpen && rows.length > shown
+        ? jsx(
+            'button',
+            {
+              type: 'button',
+              onClick: () => setShown(shown + SOURCE_LOAD_STEP),
+              className: 'flex h-6 items-center pl-2.5 text-left text-xs text-(--ui-text-quaternary) transition-colors hover:text-(--ui-text-secondary)',
+              children: `Show more (${rows.length - shown})`
+            },
+            'more'
+          )
+        : null
+    ]
   })
 }
 
@@ -1961,6 +2077,8 @@ function makePane(ctl) {
     const shownPinned = pinned.filter(r => hit(rowId(r), r))
     const shownOpen = open.filter(o => hit(o.storedSessionId))
     const shownRest = rest.filter(r => hit(rowId(r), r))
+    // Same sections as the core sidebar: local Sessions, one per platform, Cron jobs.
+    const bySource = groupBySource(shownRest)
     const shownWs = workspaces.filter(w => matchesQuery({ title: w.name }, query))
     const nothing = searching && !shownPinned.length && !shownOpen.length && !shownRest.length && !shownWs.length
 
@@ -2056,8 +2174,22 @@ function makePane(ctl) {
               )
             })
           : null,
-        shownRest.length
-          ? jsx(Section, { label: 'Sessions', children: shownRest.map(r => sessionRow('s', rowId(r), r)) })
+        bySource.sessions.length
+          ? jsx(Section, { label: 'Sessions', children: bySource.sessions.map(r => sessionRow('s', rowId(r), r)) })
+          : null,
+        ...bySource.platforms.map(g =>
+          jsx(
+            SourceSection,
+            { ctl, id: g.id, label: g.label, rows: g.rows, forceOpen: searching, renderRow: r => sessionRow(g.id, rowId(r), r) },
+            `src:${g.id}`
+          )
+        ),
+        bySource.cron.length
+          ? jsx(
+              SourceSection,
+              { ctl, id: 'cron', label: 'Cron jobs', rows: bySource.cron, forceOpen: searching, renderRow: r => sessionRow('c', rowId(r), r) },
+              'src:cron'
+            )
           : null
       ]
     })
